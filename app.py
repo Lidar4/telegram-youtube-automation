@@ -117,6 +117,7 @@ def health():
 
 @app.get("/api/devices")
 def devices():
+    # Return actual authorized ADB serials for the dashboard.
     return jsonify({"devices": controller.check_adb_connection()})
 
 
