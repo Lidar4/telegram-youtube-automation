@@ -119,14 +119,17 @@ class OTGAIPhoneController:
 
     @staticmethod
     def _redact_sensitive(text: str) -> str:
-        # Avoid sending obvious secrets/tokens from diagnostic output to an AI service.
         patterns = [
             r"(?i)(password|passwd|token|secret|api[_ -]?key)\s*[:=]\s*\S+",
             r"(?i)\bBearer\s+[A-Za-z0-9._-]+",
         ]
         redacted = text
         for pattern in patterns:
-            redacted = re.sub(pattern, lambda m: m.group(1) + ": [REDACTED]" if m.lastindex else "[REDACTED]", redacted)
+            redacted = re.sub(
+                pattern,
+                lambda m: m.group(1) + ": [REDACTED]" if m.lastindex else "[REDACTED]",
+                redacted,
+            )
         return redacted
 
     def diagnose(self, user_problem: str, report: Dict):
@@ -162,6 +165,53 @@ Clearly distinguish software, configuration, network/carrier, and possible hardw
             return {"status": "ok", "message": response.text.strip()}
         except Exception as exc:
             return {"status": "ai_error", "message": str(exc)}
+
+    def repair_plan(self, user_problem: str, report: Dict, analysis: Dict):
+        """Generate a confirmation-first repair plan; never executes device changes."""
+        if not self.model:
+            return {
+                "status": "ai_unavailable",
+                "message": "GEMINI_API_KEY is not configured.",
+                "requires_user_confirmation": True,
+                "actions": [],
+            }
+
+        safe_report = self._redact_sensitive(str(report))
+        safe_analysis = self._redact_sensitive(str(analysis))
+        prompt = f"""
+You are an Android technician assistant for an authorized device.
+Create a SAFE, confirmation-first repair plan.
+
+Problem:
+{user_problem}
+
+Diagnostic evidence:
+{safe_report}
+
+Previous analysis:
+{safe_analysis}
+
+Return only a JSON object with these keys:
+summary, confidence, actions, requires_user_confirmation, blocked_actions.
+Each item in actions must contain: id, description, risk (low/medium/high), reversible (yes/no), confirmation_required (yes/no).
+
+Rules:
+- Do not execute anything.
+- Do not provide shell/ADB commands.
+- Do not bypass Android permissions, security controls, lock screens, carrier restrictions, or authentication.
+- Prefer reversible, user-visible settings changes.
+- High-risk or irreversible actions must be blocked rather than proposed.
+- If evidence is insufficient, actions must be empty and explain what additional safe evidence is needed.
+"""
+        try:
+            response = self.model.generate_content(prompt)
+            return {
+                "status": "ok",
+                "message": response.text.strip(),
+                "requires_user_confirmation": True,
+            }
+        except Exception as exc:
+            return {"status": "ai_error", "message": str(exc), "actions": []}
 
 
 if __name__ == "__main__":
