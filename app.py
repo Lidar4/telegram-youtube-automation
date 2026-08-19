@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import threading
+import time
 
 from flask import Flask, jsonify, render_template_string, request
 from flask_sock import Sock
@@ -22,6 +23,7 @@ active_companion = None
 last_screen_frame = None
 last_screen_event = {"type": "status", "message": "waiting_for_target"}
 last_target_status = {"connected": False, "message": "waiting_for_target"}
+last_diagnostic_report = None
 
 DASHBOARD = """
 <!doctype html>
@@ -44,10 +46,10 @@ textarea{width:100%;min-height:120px;box-sizing:border-box;padding:12px;border:1
 <div class="card"><h2>Ask the AI</h2><p><small>Describe a phone problem. The AI analyzes available read-only evidence and does not execute arbitrary commands.</small></p><textarea id="problem" placeholder="Example: Mobile data is not working. Find the likely cause."></textarea><br><button class="primary" onclick="diagnose()">Diagnose</button><pre id="answer">Waiting for your problem.</pre></div>
 <script>
 function esc(v){return String(v??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));}
-function render(r){const f=[['Model',r.model],['Manufacturer',r.manufacturer],['Android',r.android_version],['SDK',r.sdk],['Serial',r.serial]];document.getElementById('summary').innerHTML=f.map(([k,v])=>`<div class="stat"><strong>${esc(k)}</strong>${esc(v)}</div>`).join('');document.getElementById('checks').innerHTML=(r.checks||[]).map(c=>`<div style="padding:10px 0;border-bottom:1px solid #eee"><b>${esc(c.name)}</b>: ${esc(c.status)}<br><small>${esc(c.value||c.error||'')}</small></div>`).join('')||'No checks.';}
+function render(r){const f=[['Model',r.device?.model],['Manufacturer',r.device?.manufacturer],['Android',r.device?.android_version],['SDK',r.device?.sdk],['Battery',r.battery?.level_percent===undefined?'—':r.battery.level_percent+'%'],['Network',r.network?.connected?'Connected':'Not connected'],['Wi-Fi',r.network?.transport_wifi?'Yes':'No'],['Cellular',r.network?.transport_cellular?'Yes':'No'],['Storage used',r.storage?.used_percent===undefined?'—':r.storage.used_percent+'%']];document.getElementById('summary').innerHTML=f.map(([k,v])=>`<div class="stat"><strong>${esc(k)}</strong>${esc(v)}</div>`).join('');document.getElementById('checks').innerHTML=`<pre>${esc(JSON.stringify(r,null,2))}</pre>`;}
 async function refresh(){try{const d=await fetch('/api/target/status').then(r=>r.json());const s=document.getElementById('status');s.textContent=d.connected?'Target connected':'Target not connected';s.className='badge '+(d.connected?'online':'offline');document.getElementById('targetStatus').textContent=JSON.stringify(d,null,2);if(d.report)render(d.report);}catch(e){document.getElementById('status').textContent='Dashboard error';document.getElementById('status').className='badge offline';}}
-async function diagnose(){const problem=document.getElementById('problem').value.trim();if(!problem)return;document.getElementById('answer').textContent='Requesting target diagnostics…';try{const r=await fetch('/api/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem})}).then(x=>x.json());if(r.report)render(r.report);document.getElementById('answer').textContent=r.diagnosis?.message||r.error||'No diagnosis returned.';}catch(e){document.getElementById('answer').textContent='Request failed: '+e.message;}}
-function connectScreen(){const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/ws/viewer`);ws.binaryType='arraybuffer';ws.onopen=()=>document.getElementById('screenEvent').textContent='Viewer connected. Waiting for target screen…';ws.onmessage=e=>{if(typeof e.data==='string'){try{const msg=JSON.parse(e.data);document.getElementById('screenEvent').textContent=`${msg.type}: ${msg.message}`;document.getElementById('targetStatus').textContent=JSON.stringify(msg,null,2);}catch(_){}}else{const blob=new Blob([e.data],{type:'image/jpeg'});const url=URL.createObjectURL(blob);const img=document.getElementById('screen');img.onload=()=>URL.revokeObjectURL(url);img.src=url;img.hidden=false;document.getElementById('screenEvent').textContent='Live target screen';}};ws.onclose=()=>{document.getElementById('screenEvent').textContent='Viewer disconnected. Retrying…';setTimeout(connectScreen,1500);};ws.onerror=()=>ws.close();}
+async function diagnose(){const problem=document.getElementById('problem').value.trim();if(!problem)return;document.getElementById('answer').textContent='Requesting target diagnostics…';try{const r=await fetch('/api/diagnostics/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem})}).then(x=>x.json());if(!r.ok){document.getElementById('answer').textContent=r.error||'Diagnostic request failed.';return;}document.getElementById('answer').textContent='Diagnostic request sent. Waiting for target report…';}catch(e){document.getElementById('answer').textContent='Request failed: '+e.message;}}
+function connectScreen(){const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/ws/viewer`);ws.binaryType='arraybuffer';ws.onopen=()=>document.getElementById('screenEvent').textContent='Viewer connected. Waiting for target screen…';ws.onmessage=e=>{if(typeof e.data==='string'){try{const msg=JSON.parse(e.data);document.getElementById('screenEvent').textContent=`${msg.type}: ${msg.message||''}`;document.getElementById('targetStatus').textContent=JSON.stringify(msg,null,2);if(msg.type==='diagnostic_report'){render(msg);document.getElementById('answer').textContent='Diagnostic report received.';}}catch(_){}}else{const blob=new Blob([e.data],{type:'image/jpeg'});const url=URL.createObjectURL(blob);const img=document.getElementById('screen');img.onload=()=>URL.revokeObjectURL(url);img.src=url;img.hidden=false;document.getElementById('screenEvent').textContent='Live target screen';}};ws.onclose=()=>{document.getElementById('screenEvent').textContent='Viewer disconnected. Retrying…';setTimeout(connectScreen,1500);};ws.onerror=()=>ws.close();}
 refresh();connectScreen();setInterval(refresh,3000);
 </script></body></html>
 """
@@ -126,7 +128,7 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True, "service": "ai-android-technician", "version": "3"})
+    return jsonify({"ok": True, "service": "ai-android-technician", "version": "4"})
 
 
 @app.get("/api/devices")
@@ -136,7 +138,10 @@ def devices():
 
 @app.get("/api/target/status")
 def target_status():
-    return jsonify(last_target_status)
+    payload = dict(last_target_status)
+    if last_diagnostic_report is not None:
+        payload["report"] = last_diagnostic_report
+    return jsonify(payload)
 
 
 @app.get("/api/diagnostics")
@@ -155,7 +160,7 @@ def request_diagnostics():
         "type": "diagnostic_request",
         "request_id": os.urandom(8).hex(),
         "problem": problem,
-        "timestamp": int(__import__("time").time() * 1000),
+        "timestamp": int(time.time() * 1000),
     }
     if not _send_to_companion(payload):
         return jsonify({"error": "No connected companion is available"}), 503
@@ -163,22 +168,9 @@ def request_diagnostics():
     return jsonify({"ok": True, "request_id": payload["request_id"]})
 
 
-@app.post("/api/diagnose")
-def diagnose():
-    body = request.get_json(silent=True) or {}
-    problem = str(body.get("problem", "")).strip()
-    serial = body.get("serial")
-    if not problem:
-        return jsonify({"error": "problem is required"}), 400
-    report = controller.collect_report(serial)
-    if not report.connected:
-        return jsonify({"error": "No authorized ADB device detected", "report": report.to_dict()}), 503
-    return jsonify({"report": report.to_dict(), "diagnosis": controller.diagnose(problem, report.to_dict())})
-
-
 @sock.route("/ws/companion")
 def companion_socket(ws):
-    global active_companion, last_screen_frame, last_screen_event, last_target_status
+    global active_companion, last_screen_frame, last_screen_event, last_target_status, last_diagnostic_report
     with companion_lock:
         active_companion = ws
     last_target_status = {"connected": True, "message": "target_connected"}
@@ -197,6 +189,8 @@ def companion_socket(ws):
                 except json.JSONDecodeError:
                     event = {"type": "event", "message": str(message)}
                 last_screen_event = event
+                if event.get("type") == "diagnostic_report":
+                    last_diagnostic_report = event
                 last_target_status = {"connected": True, **event}
                 _broadcast(json.dumps(event))
     finally:
@@ -215,6 +209,8 @@ def viewer_socket(ws):
         ws.send(json.dumps(last_target_status))
         if last_screen_event:
             ws.send(json.dumps(last_screen_event))
+        if last_diagnostic_report:
+            ws.send(json.dumps(last_diagnostic_report))
         if last_screen_frame:
             ws.send(last_screen_frame)
         while True:
