@@ -9,6 +9,7 @@
         android:allowBackup="false"
         android:label="AI Android Technician"
         android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar"
         android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
