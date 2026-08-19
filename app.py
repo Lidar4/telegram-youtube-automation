@@ -10,9 +10,11 @@ from flask_sock import Sock
 from zeroconf import ServiceInfo, Zeroconf
 
 from otg import OTGAIPhoneController
+from repair_routes import repair_bp
 
 app = Flask(__name__)
 sock = Sock(app)
+app.register_blueprint(repair_bp)
 controller = OTGAIPhoneController()
 zeroconf = None
 service_info = None
@@ -45,11 +47,13 @@ textarea{width:100%;min-height:120px;box-sizing:border-box;padding:12px;border:1
 <div class="card"><h2>Target status</h2><pre id="targetStatus">Waiting for target phone.</pre></div>
 <div class="card"><h2>Diagnostic checks</h2><div id="checks">No report yet.</div></div>
 <div class="card"><h2>Ask the AI</h2><p><small>Describe a phone problem. The AI analyzes available read-only evidence and does not execute arbitrary commands.</small></p><textarea id="problem" placeholder="Example: Mobile data is not working. Find the likely cause."></textarea><br><button class="primary" onclick="diagnose()">Diagnose</button><pre id="answer">Waiting for your problem.</pre></div>
+<div class="card"><h2>Repair approvals</h2><p><small>AI repair plans require technician approval. High-risk or irreversible actions also require confirmation on the target device.</small></p><pre id="repairState">No repair plan yet.</pre><button onclick="loadRepair()">Load latest repair plan</button></div>
 <script>
 function esc(v){return String(v??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));}
 function render(r){const f=[['Model',r.device?.model],['Manufacturer',r.device?.manufacturer],['Android',r.device?.android_version],['SDK',r.device?.sdk],['Battery',r.battery?.level_percent===undefined?'—':r.battery.level_percent+'%'],['Network',r.network?.connected?'Connected':'Not connected'],['Wi-Fi',r.network?.transport_wifi?'Yes':'No'],['Cellular',r.network?.transport_cellular?'Yes':'No'],['Storage used',r.storage?.used_percent===undefined?'—':r.storage.used_percent+'%']];document.getElementById('summary').innerHTML=f.map(([k,v])=>`<div class="stat"><strong>${esc(k)}</strong>${esc(v)}</div>`).join('');document.getElementById('checks').innerHTML=`<pre>${esc(JSON.stringify(r,null,2))}</pre>`;}
 async function refresh(){try{const d=await fetch('/api/target/status').then(r=>r.json());const s=document.getElementById('status');s.textContent=d.connected?'Target connected':'Target not connected';s.className='badge '+(d.connected?'online':'offline');document.getElementById('targetStatus').textContent=JSON.stringify(d,null,2);if(d.report)render(d.report);if(d.ai_analysis?.message)document.getElementById('answer').textContent=d.ai_analysis.message;}catch(e){document.getElementById('status').textContent='Dashboard error';document.getElementById('status').className='badge offline';}}
 async function diagnose(){const problem=document.getElementById('problem').value.trim();if(!problem)return;document.getElementById('answer').textContent='Requesting target diagnostics…';try{const r=await fetch('/api/diagnostics/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem})}).then(x=>x.json());if(!r.ok){document.getElementById('answer').textContent=r.error||'Diagnostic request failed.';return;}document.getElementById('answer').textContent='Diagnostic request sent. Waiting for target report…';}catch(e){document.getElementById('answer').textContent='Request failed: '+e.message;}}
+async function loadRepair(){document.getElementById('repairState').textContent='Repair plans are available through /api/repair/...';}
 function connectScreen(){const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/ws/viewer`);ws.binaryType='arraybuffer';ws.onopen=()=>document.getElementById('screenEvent').textContent='Viewer connected. Waiting for target screen…';ws.onmessage=e=>{if(typeof e.data==='string'){try{const msg=JSON.parse(e.data);document.getElementById('screenEvent').textContent=`${msg.type}: ${msg.message||''}`;document.getElementById('targetStatus').textContent=JSON.stringify(msg,null,2);if(msg.type==='diagnostic_report'){render(msg);document.getElementById('answer').textContent='Diagnostic report received. You can now ask the AI to analyze it.';}if(msg.type==='ai_analysis'){document.getElementById('answer').textContent=msg.message||'AI analysis received.';}}catch(_){}}else{const blob=new Blob([e.data],{type:'image/jpeg'});const url=URL.createObjectURL(blob);const img=document.getElementById('screen');img.onload=()=>URL.revokeObjectURL(url);img.src=url;img.hidden=false;document.getElementById('screenEvent').textContent='Live target screen';}};ws.onclose=()=>{document.getElementById('screenEvent').textContent='Viewer disconnected. Retrying…';setTimeout(connectScreen,1500);};ws.onerror=()=>ws.close();}
 refresh();connectScreen();setInterval(refresh,3000);
 </script></body></html>
@@ -218,7 +222,6 @@ def companion_socket(ws):
             if active_companion is ws:
                 active_companion = None
         last_target_status = {"connected": False, "message": "target_disconnected"}
-        _broadcast(json.dumps(last_target_status))
 
 
 @sock.route("/ws/viewer")
@@ -226,15 +229,9 @@ def viewer_socket(ws):
     with viewer_lock:
         viewer_clients.add(ws)
     try:
-        ws.send(json.dumps(last_target_status))
-        if last_screen_event:
-            ws.send(json.dumps(last_screen_event))
-        if last_diagnostic_report:
-            ws.send(json.dumps(last_diagnostic_report))
-        if last_ai_analysis:
-            ws.send(json.dumps({"type": "ai_analysis", **last_ai_analysis}))
-        if last_screen_frame:
+        if last_screen_frame is not None:
             ws.send(last_screen_frame)
+        ws.send(json.dumps(last_screen_event))
         while True:
             if ws.receive() is None:
                 break
@@ -243,7 +240,9 @@ def viewer_socket(ws):
             viewer_clients.discard(ws)
 
 
+atexit.register(_stop_service)
+
 if __name__ == "__main__":
     _advertise_service()
-    atexit.register(_stop_service)
-    app.run(host=os.environ.get("OTG_HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "5000")), debug=False)
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
