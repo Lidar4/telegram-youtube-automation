@@ -1,3 +1,4 @@
+import atexit
 import os
 import socket
 import threading
@@ -9,6 +10,8 @@ from otg import OTGAIPhoneController
 
 app = Flask(__name__)
 controller = OTGAIPhoneController()
+zeroconf = None
+service_info = None
 
 DASHBOARD = """
 <!doctype html>
@@ -36,56 +39,45 @@ refresh();
 </script></body></html>
 """
 
-SERVICE_TYPE = "_otgtech._tcp.local."
-SERVICE_NAME = "AI-Android-Technician._otgtech._tcp.local."
-zeroconf_instance = None
-service_info = None
-
 
 def _local_ip():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("192.0.2.1", 9))
-        return sock.getsockname()[0]
+        ip = sock.getsockname()[0]
+        sock.close()
+        return ip
     except OSError:
         return "127.0.0.1"
-    finally:
-        sock.close()
 
 
-def start_service_discovery(port: int):
-    global zeroconf_instance, service_info
-    address = _local_ip()
-    if address == "127.0.0.1":
+def _advertise_service():
+    global zeroconf, service_info
+    if zeroconf is not None:
         return
-    try:
-        zeroconf_instance = Zeroconf()
-        service_info = ServiceInfo(
-            SERVICE_TYPE,
-            SERVICE_NAME,
-            addresses=[socket.inet_aton(address)],
-            port=port,
-            properties={b"version": b"0.1", b"capability": b"diagnostics"},
-        )
-        zeroconf_instance.register_service(service_info)
-    except Exception:
-        if zeroconf_instance:
-            zeroconf_instance.close()
-        zeroconf_instance = None
-        service_info = None
+    port = int(os.environ.get("PORT", "5000"))
+    ip = _local_ip()
+    service_info = ServiceInfo(
+        "_otgtech._tcp.local.",
+        "AI Android Technician._otgtech._tcp.local.",
+        addresses=[socket.inet_aton(ip)],
+        port=port,
+        properties={"api": "/api/health", "version": "1"},
+    )
+    zeroconf = Zeroconf()
+    zeroconf.register_service(service_info)
 
 
-def stop_service_discovery():
-    global zeroconf_instance, service_info
-    if zeroconf_instance:
+def _stop_service():
+    global zeroconf, service_info
+    if zeroconf is not None:
         try:
-            if service_info:
-                zeroconf_instance.unregister_service(service_info)
-            zeroconf_instance.close()
-        except Exception:
-            pass
-    zeroconf_instance = None
-    service_info = None
+            if service_info is not None:
+                zeroconf.unregister_service(service_info)
+            zeroconf.close()
+        finally:
+            zeroconf = None
+            service_info = None
 
 
 @app.get("/")
@@ -95,7 +87,7 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return jsonify({"status": "ok", "service": "ai-android-technician", "version": "0.1"})
+    return jsonify({"ok": True, "service": "ai-android-technician", "version": "1"})
 
 
 @app.get("/api/devices")
@@ -123,10 +115,6 @@ def diagnose():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5000"))
-    host = os.environ.get("OTG_HOST", "0.0.0.0")
-    start_service_discovery(port)
-    try:
-        app.run(host=host, port=port, debug=False)
-    finally:
-        stop_service_discovery()
+    _advertise_service()
+    atexit.register(_stop_service)
+    app.run(host=os.environ.get("OTG_HOST", "0.0.0.0"), port=int(os.environ.get("PORT", "5000")), debug=False)
