@@ -1,14 +1,7 @@
-"""Confirmation-first repair approval state for the technician dashboard.
-
-This module only creates and validates approval records. It never executes a
-repair command and never bypasses Android/user authorization.
-"""
-
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+import uuid
+from dataclasses import asdict, dataclass
 from threading import Lock
-from typing import Dict, List
-from uuid import uuid4
+from typing import Any, Dict, List, Optional
 
 
 BLOCKED_ACTIONS = {
@@ -16,7 +9,6 @@ BLOCKED_ACTIONS = {
     "security_bypass",
     "credential_access",
     "lockscreen_bypass",
-    "carrier_restriction_bypass",
     "silent_factory_reset",
 }
 
@@ -27,82 +19,116 @@ class RepairAction:
     description: str
     risk: str
     reversible: bool
-    confirmation_required: bool = True
+    requires_device_confirmation: bool = False
 
 
 @dataclass
-class Approval:
+class RepairPlan:
     approval_id: str
     problem: str
     summary: str
     actions: List[RepairAction]
-    status: str
-    created_at: str
+    risk: str
+    reversible: bool
+    confirmation_required: bool
+    status: str = "pending"
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         data = asdict(self)
         data["actions"] = [asdict(action) for action in self.actions]
         return data
 
 
-class RepairApprovalStore:
-    """Small in-memory approval store for the first implementation stage."""
+class RepairApprovalManager:
+    """In-memory, confirmation-first repair plan store.
+
+    This module creates and tracks approval state only. It does not execute
+    Android commands or bypass device/user authorization.
+    """
+
+    ALLOWED_STATUSES = {
+        "pending",
+        "approved",
+        "rejected",
+        "executing",
+        "completed",
+        "failed",
+    }
 
     def __init__(self):
-        self._items: Dict[str, Approval] = {}
+        self._store: Dict[str, RepairPlan] = {}
         self._lock = Lock()
 
-    def create(self, problem: str, summary: str, actions: list) -> Approval:
-        safe_actions = []
-        for raw in actions or []:
-            action_id = str(raw.get("id", "")).strip()
-            description = str(raw.get("description", "")).strip()
-            risk = str(raw.get("risk", "high")).lower()
-            reversible = str(raw.get("reversible", "no")).lower() == "yes"
+    def create_plan_from_ai(self, diagnosis_data: Dict[str, Any]) -> RepairPlan:
+        approval_id = uuid.uuid4().hex[:8]
+        raw_actions = diagnosis_data.get("actions", [])
+        actions: List[RepairAction] = []
+
+        for i, raw in enumerate(raw_actions if isinstance(raw_actions, list) else []):
+            if not isinstance(raw, dict):
+                continue
+            action_id = str(raw.get("id", f"act_{i}")).strip()
+            description = str(raw.get("description", "Standard diagnostic adjustment")).strip()
             if not action_id or not description:
                 continue
+
+            lowered = f"{action_id} {description}".lower()
             if action_id in BLOCKED_ACTIONS or any(
-                blocked in description.lower()
-                for blocked in ("security bypass", "credential", "lockscreen bypass")
+                term in lowered
+                for term in ("security bypass", "credential access", "lockscreen bypass", "silent factory reset")
             ):
                 continue
+
+            risk = str(raw.get("risk", "high")).lower()
             if risk not in {"low", "medium", "high"}:
                 risk = "high"
-            # High-risk/irreversible actions are approval-gated and never
-            # silently converted into executable actions by this module.
-            safe_actions.append(
+
+            reversible = bool(raw.get("reversible", False))
+            requires_device_confirmation = bool(raw.get("requires_device_confirmation", False))
+            # High-risk or irreversible actions must require device confirmation.
+            if risk == "high" or not reversible:
+                requires_device_confirmation = True
+
+            actions.append(
                 RepairAction(
                     id=action_id,
                     description=description,
                     risk=risk,
                     reversible=reversible,
-                    confirmation_required=True,
+                    requires_device_confirmation=requires_device_confirmation,
                 )
             )
 
-        approval = Approval(
-            approval_id=uuid4().hex,
-            problem=problem,
-            summary=summary,
-            actions=safe_actions,
-            status="pending_confirmation",
-            created_at=datetime.now(timezone.utc).isoformat(),
+        plan = RepairPlan(
+            approval_id=approval_id,
+            problem=str(diagnosis_data.get("problem", "Unknown diagnostic issue")),
+            summary=str(diagnosis_data.get("summary", "Automated AI repair evaluation.")),
+            actions=actions,
+            risk=str(diagnosis_data.get("overall_risk", "high")).lower(),
+            reversible=bool(diagnosis_data.get("reversible", False)),
+            confirmation_required=True,
+            status="pending",
         )
+        if plan.risk not in {"low", "medium", "high"}:
+            plan.risk = "high"
+
         with self._lock:
-            self._items[approval.approval_id] = approval
-        return approval
+            self._store[approval_id] = plan
+        return plan
 
-    def get(self, approval_id: str):
+    def get_plan(self, approval_id: str) -> Optional[RepairPlan]:
         with self._lock:
-            return self._items.get(approval_id)
+            return self._store.get(approval_id)
 
-    def decide(self, approval_id: str, approved: bool):
+    def update_status(self, approval_id: str, status: str) -> bool:
+        if status not in self.ALLOWED_STATUSES:
+            return False
         with self._lock:
-            approval = self._items.get(approval_id)
-            if approval is None:
-                return None
-            approval.status = "approved" if approved else "rejected"
-            return approval
+            plan = self._store.get(approval_id)
+            if plan is None:
+                return False
+            plan.status = status
+            return True
 
 
-approval_store = RepairApprovalStore()
+approval_manager = RepairApprovalManager()
