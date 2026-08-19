@@ -17,6 +17,8 @@ zeroconf = None
 service_info = None
 viewer_clients = set()
 viewer_lock = threading.Lock()
+companion_lock = threading.Lock()
+active_companion = None
 last_screen_frame = None
 last_screen_event = {"type": "status", "message": "waiting_for_target"}
 last_target_status = {"connected": False, "message": "waiting_for_target"}
@@ -44,7 +46,7 @@ textarea{width:100%;min-height:120px;box-sizing:border-box;padding:12px;border:1
 function esc(v){return String(v??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));}
 function render(r){const f=[['Model',r.model],['Manufacturer',r.manufacturer],['Android',r.android_version],['SDK',r.sdk],['Serial',r.serial]];document.getElementById('summary').innerHTML=f.map(([k,v])=>`<div class="stat"><strong>${esc(k)}</strong>${esc(v)}</div>`).join('');document.getElementById('checks').innerHTML=(r.checks||[]).map(c=>`<div style="padding:10px 0;border-bottom:1px solid #eee"><b>${esc(c.name)}</b>: ${esc(c.status)}<br><small>${esc(c.value||c.error||'')}</small></div>`).join('')||'No checks.';}
 async function refresh(){try{const d=await fetch('/api/target/status').then(r=>r.json());const s=document.getElementById('status');s.textContent=d.connected?'Target connected':'Target not connected';s.className='badge '+(d.connected?'online':'offline');document.getElementById('targetStatus').textContent=JSON.stringify(d,null,2);if(d.report)render(d.report);}catch(e){document.getElementById('status').textContent='Dashboard error';document.getElementById('status').className='badge offline';}}
-async function diagnose(){const problem=document.getElementById('problem').value.trim();if(!problem)return;document.getElementById('answer').textContent='Analyzing…';try{const r=await fetch('/api/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem})}).then(x=>x.json());if(r.report)render(r.report);document.getElementById('answer').textContent=r.diagnosis?.message||r.error||'No diagnosis returned.';}catch(e){document.getElementById('answer').textContent='Request failed: '+e.message;}}
+async function diagnose(){const problem=document.getElementById('problem').value.trim();if(!problem)return;document.getElementById('answer').textContent='Requesting target diagnostics…';try{const r=await fetch('/api/diagnose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem})}).then(x=>x.json());if(r.report)render(r.report);document.getElementById('answer').textContent=r.diagnosis?.message||r.error||'No diagnosis returned.';}catch(e){document.getElementById('answer').textContent='Request failed: '+e.message;}}
 function connectScreen(){const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/ws/viewer`);ws.binaryType='arraybuffer';ws.onopen=()=>document.getElementById('screenEvent').textContent='Viewer connected. Waiting for target screen…';ws.onmessage=e=>{if(typeof e.data==='string'){try{const msg=JSON.parse(e.data);document.getElementById('screenEvent').textContent=`${msg.type}: ${msg.message}`;document.getElementById('targetStatus').textContent=JSON.stringify(msg,null,2);}catch(_){}}else{const blob=new Blob([e.data],{type:'image/jpeg'});const url=URL.createObjectURL(blob);const img=document.getElementById('screen');img.onload=()=>URL.revokeObjectURL(url);img.src=url;img.hidden=false;document.getElementById('screenEvent').textContent='Live target screen';}};ws.onclose=()=>{document.getElementById('screenEvent').textContent='Viewer disconnected. Retrying…';setTimeout(connectScreen,1500);};ws.onerror=()=>ws.close();}
 refresh();connectScreen();setInterval(refresh,3000);
 </script></body></html>
@@ -106,6 +108,17 @@ def _broadcast(payload):
                 viewer_clients.discard(client)
 
 
+def _send_to_companion(payload):
+    with companion_lock:
+        companion = active_companion
+    if companion is None:
+        return False
+    try:
+        return bool(companion.send(json.dumps(payload)))
+    except Exception:
+        return False
+
+
 @app.get("/")
 def index():
     return render_template_string(DASHBOARD)
@@ -113,7 +126,7 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True, "service": "ai-android-technician", "version": "2"})
+    return jsonify({"ok": True, "service": "ai-android-technician", "version": "3"})
 
 
 @app.get("/api/devices")
@@ -132,6 +145,24 @@ def diagnostics():
     return jsonify(controller.collect_report(serial).to_dict())
 
 
+@app.post("/api/diagnostics/request")
+def request_diagnostics():
+    body = request.get_json(silent=True) or {}
+    problem = str(body.get("problem", "")).strip()
+    if not problem:
+        return jsonify({"error": "problem is required"}), 400
+    payload = {
+        "type": "diagnostic_request",
+        "request_id": os.urandom(8).hex(),
+        "problem": problem,
+        "timestamp": int(__import__("time").time() * 1000),
+    }
+    if not _send_to_companion(payload):
+        return jsonify({"error": "No connected companion is available"}), 503
+    _broadcast(json.dumps({"type": "status", "message": "diagnostic_requested", "request_id": payload["request_id"]}))
+    return jsonify({"ok": True, "request_id": payload["request_id"]})
+
+
 @app.post("/api/diagnose")
 def diagnose():
     body = request.get_json(silent=True) or {}
@@ -147,7 +178,9 @@ def diagnose():
 
 @sock.route("/ws/companion")
 def companion_socket(ws):
-    global last_screen_frame, last_screen_event, last_target_status
+    global active_companion, last_screen_frame, last_screen_event, last_target_status
+    with companion_lock:
+        active_companion = ws
     last_target_status = {"connected": True, "message": "target_connected"}
     _broadcast(json.dumps({"type": "status", "message": "target_connected"}))
     try:
@@ -167,6 +200,9 @@ def companion_socket(ws):
                 last_target_status = {"connected": True, **event}
                 _broadcast(json.dumps(event))
     finally:
+        with companion_lock:
+            if active_companion is ws:
+                active_companion = None
         last_target_status = {"connected": False, "message": "target_disconnected"}
         _broadcast(json.dumps(last_target_status))
 
