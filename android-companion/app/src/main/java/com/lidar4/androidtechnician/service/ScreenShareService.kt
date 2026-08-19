@@ -17,7 +17,9 @@ import android.os.IBinder
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.lifecycle.LifecycleService
+import com.lidar4.androidtechnician.diagnostics.DiagnosticCollector
 import com.lidar4.androidtechnician.network.TechnicianSocketClient
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
 class ScreenShareService : LifecycleService() {
@@ -85,7 +87,7 @@ class ScreenShareService : LifecycleService() {
 
     private fun startProjection(resultCode: Int, data: Intent, host: String, port: Int) {
         socketClient?.disconnect()
-        socketClient = TechnicianSocketClient()
+        socketClient = TechnicianSocketClient { text -> handleHostMessage(text) }
         socketClient?.connect(host, port)
         socketClient?.sendEvent("status", "screen_sharing_started")
 
@@ -98,6 +100,27 @@ class ScreenShareService : LifecycleService() {
             }
         }, null)
         setupVirtualDisplay()
+    }
+
+    private fun handleHostMessage(text: String) {
+        try {
+            val message = JSONObject(text)
+            if (message.optString("type") != "diagnostic_request") return
+
+            val requestId = message.optString("request_id")
+            val problem = message.optString("problem")
+            if (requestId.isBlank()) {
+                socketClient?.sendEvent("error", "diagnostic_request_missing_id")
+                return
+            }
+
+            socketClient?.sendEvent("status", "diagnostic_started")
+            val report = DiagnosticCollector(this).collect(requestId, problem)
+            socketClient?.sendJson(report)
+            socketClient?.sendEvent("status", "diagnostic_completed")
+        } catch (e: Exception) {
+            socketClient?.sendEvent("error", "diagnostic_request_error: ${e.message ?: "unknown"}")
+        }
     }
 
     private fun setupVirtualDisplay() {
