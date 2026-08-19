@@ -1,22 +1,65 @@
-# Nibhir Messenger
+# AI-Powered Android OTG & Web Controller
 
-A lightweight, original, login-free communication app foundation.
+AI-assisted Android diagnostics for technicians using ADB, Gemini, and a local Flask dashboard.
 
-## Current
-- No account or password login
-- Create or join a room with a short code
-- Local message history for the current device
-- Responsive mobile-first chat UI
-- Message edit/delete/copy/reply UI
-- Attachment picker UI
-- Dark/light theme toggle
-- Room sharing/copy-code controls
+## Current foundation
 
-## Planned realtime layer
-The next stage will connect rooms to a free-tier realtime backend (for example Supabase Realtime). No secret key is stored in this repository. The app is designed so the public project URL and publishable/anon client key can be supplied at deployment time.
+- Detect authorized ADB devices.
+- Collect read-only device diagnostics.
+- Send a technician's natural-language problem and the diagnostic report to Gemini for analysis.
+- Expose diagnostics through a local Flask API.
 
-## Important
-This project is an original implementation. It does not copy another app's proprietary source code or assets.
+## Setup
 
-## Run
-Open `index.html` in a modern browser, or serve the repository with any static web server.
+```bash
+python -m pip install -r requirements.txt
+```
+
+Set your Gemini API key as an environment variable. Never commit an API key to GitHub.
+
+Linux/macOS:
+
+```bash
+export GEMINI_API_KEY="YOUR_KEY"
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GEMINI_API_KEY="YOUR_KEY"
+```
+
+Install Android SDK Platform-Tools (`adb`) separately and authorize the target phone for debugging.
+
+Run the CLI:
+
+```bash
+python otg.py
+```
+
+Run the local web API:
+
+```bash
+python app.py
+```
+
+The first implementation is intentionally diagnostic/read-only. Repair actions will be added only through explicit, validated operations and confirmation for sensitive changes.
+
+## Architecture
+
+```text
+Target Android Phone
+        |
+      ADB
+        |
+        v
+  Python Diagnostic Layer
+        |
+   +----+----+
+   |         |
+ Gemini    Flask API
+   |         |
+   +----+----+
+        |
+ Technician Dashboard
+```
