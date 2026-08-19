@@ -1,6 +1,9 @@
 import os
+import socket
+import threading
 
 from flask import Flask, jsonify, render_template_string, request
+from zeroconf import ServiceInfo, Zeroconf
 
 from otg import OTGAIPhoneController
 
@@ -33,18 +36,78 @@ refresh();
 </script></body></html>
 """
 
+SERVICE_TYPE = "_otgtech._tcp.local."
+SERVICE_NAME = "AI-Android-Technician._otgtech._tcp.local."
+zeroconf_instance = None
+service_info = None
+
+
+def _local_ip():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("192.0.2.1", 9))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def start_service_discovery(port: int):
+    global zeroconf_instance, service_info
+    address = _local_ip()
+    if address == "127.0.0.1":
+        return
+    try:
+        zeroconf_instance = Zeroconf()
+        service_info = ServiceInfo(
+            SERVICE_TYPE,
+            SERVICE_NAME,
+            addresses=[socket.inet_aton(address)],
+            port=port,
+            properties={b"version": b"0.1", b"capability": b"diagnostics"},
+        )
+        zeroconf_instance.register_service(service_info)
+    except Exception:
+        if zeroconf_instance:
+            zeroconf_instance.close()
+        zeroconf_instance = None
+        service_info = None
+
+
+def stop_service_discovery():
+    global zeroconf_instance, service_info
+    if zeroconf_instance:
+        try:
+            if service_info:
+                zeroconf_instance.unregister_service(service_info)
+            zeroconf_instance.close()
+        except Exception:
+            pass
+    zeroconf_instance = None
+    service_info = None
+
+
 @app.get("/")
 def index():
     return render_template_string(DASHBOARD)
+
+
+@app.get("/api/health")
+def health():
+    return jsonify({"status": "ok", "service": "ai-android-technician", "version": "0.1"})
+
 
 @app.get("/api/devices")
 def devices():
     return jsonify({"devices": controller.check_adb_connection()})
 
+
 @app.get("/api/diagnostics")
 def diagnostics():
     serial = request.args.get("serial")
     return jsonify(controller.collect_report(serial).to_dict())
+
 
 @app.post("/api/diagnose")
 def diagnose():
@@ -58,5 +121,12 @@ def diagnose():
         return jsonify({"error": "No authorized ADB device detected", "report": report.to_dict()}), 503
     return jsonify({"report": report.to_dict(), "diagnosis": controller.diagnose(problem, report.to_dict())})
 
+
 if __name__ == "__main__":
-    app.run(host=os.environ.get("OTG_HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "5000")), debug=False)
+    port = int(os.environ.get("PORT", "5000"))
+    host = os.environ.get("OTG_HOST", "0.0.0.0")
+    start_service_discovery(port)
+    try:
+        app.run(host=host, port=port, debug=False)
+    finally:
+        stop_service_discovery()
