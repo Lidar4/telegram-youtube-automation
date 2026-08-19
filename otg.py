@@ -21,6 +21,7 @@ class DeviceReport:
     mobile_data: Optional[str] = None
     connectivity: Optional[str] = None
     ip_addresses: Optional[str] = None
+    diagnostics_errors: Optional[dict] = None
 
     def to_dict(self):
         return asdict(self)
@@ -29,7 +30,8 @@ class DeviceReport:
 class OTGAIPhoneController:
     """Read-only Android diagnostics with AI-assisted analysis.
 
-    This phase intentionally does not execute AI-generated shell commands.
+    AI output is analysis only in this phase. No AI-generated shell command
+    is executed automatically.
     """
 
     def __init__(self):
@@ -44,7 +46,13 @@ class OTGAIPhoneController:
         if serial:
             command += ["-s", serial]
         command += list(args)
-        return subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
 
     def check_adb_connection(self):
         try:
@@ -58,19 +66,56 @@ class OTGAIPhoneController:
         except (FileNotFoundError, subprocess.SubprocessError):
             return []
 
-    def _prop(self, serial, name):
-        result = self._adb("shell", "getprop", name, serial=serial)
-        return result.stdout.strip() if result.returncode == 0 else None
+    def _prop(self, serial: str, name: str):
+        try:
+            result = self._adb("shell", "getprop", name, serial=serial)
+            return result.stdout.strip() if result.returncode == 0 else None
+        except subprocess.SubprocessError:
+            return None
 
-    def _output(self, serial, *args):
-        result = self._adb("shell", *args, serial=serial)
-        return result.stdout.strip() if result.returncode == 0 else None
+    def _output(self, serial: str, *args: str):
+        try:
+            result = self._adb("shell", *args, serial=serial)
+            if result.returncode == 0:
+                return result.stdout.strip() or None
+            return None
+        except subprocess.SubprocessError:
+            return None
+
+    def _checked_output(self, serial: str, *args: str):
+        """Return command output plus a small, non-sensitive error marker."""
+        try:
+            result = self._adb("shell", *args, serial=serial)
+            if result.returncode == 0:
+                return result.stdout.strip() or None, None
+            return None, (result.stderr.strip() or f"exit code {result.returncode}")
+        except subprocess.TimeoutExpired:
+            return None, "command timed out"
+        except subprocess.SubprocessError as exc:
+            return None, str(exc)
 
     def collect_report(self, serial=None):
         devices = self.check_adb_connection()
         serial = serial or (devices[0] if devices else None)
         if not serial:
             return DeviceReport(connected=False)
+
+        checks = {
+            "battery": ("dumpsys", "battery"),
+            "storage": ("df", "-h", "/data"),
+            "ram": ("cat", "/proc/meminfo"),
+            "wifi": ("cmd", "wifi", "status"),
+            "mobile_data": ("cmd", "phone", "get-data-state"),
+            "connectivity": ("dumpsys", "connectivity"),
+            "ip_addresses": ("ip", "addr", "show"),
+        }
+        values = {}
+        errors = {}
+        for key, command in checks.items():
+            value, error = self._checked_output(serial, *command)
+            values[key] = value
+            if error:
+                errors[key] = error
 
         return DeviceReport(
             connected=True,
@@ -79,13 +124,14 @@ class OTGAIPhoneController:
             manufacturer=self._prop(serial, "ro.product.manufacturer"),
             android_version=self._prop(serial, "ro.build.version.release"),
             sdk=self._prop(serial, "ro.build.version.sdk"),
-            battery=self._output(serial, "dumpsys", "battery"),
-            storage=self._output(serial, "df", "-h", "/data"),
-            ram=self._output(serial, "cat", "/proc/meminfo"),
-            wifi=self._output(serial, "cmd", "wifi", "status"),
-            mobile_data=self._output(serial, "cmd", "phone", "get-data-state"),
-            connectivity=self._output(serial, "dumpsys", "connectivity"),
-            ip_addresses=self._output(serial, "ip", "addr", "show"),
+            battery=values["battery"],
+            storage=values["storage"],
+            ram=values["ram"],
+            wifi=values["wifi"],
+            mobile_data=values["mobile_data"],
+            connectivity=values["connectivity"],
+            ip_addresses=values["ip_addresses"],
+            diagnostics_errors=errors or None,
         )
 
     def diagnose(self, user_problem, report):
@@ -112,6 +158,7 @@ Analyze only the supplied evidence. Return:
 Do not invent unavailable information.
 Do not output shell commands or instructions for bypassing Android security.
 Do not claim a hardware or carrier fault unless the evidence supports it.
+If a diagnostic check failed or is unavailable, say so explicitly.
 """
         try:
             response = self.model.generate_content(prompt)
