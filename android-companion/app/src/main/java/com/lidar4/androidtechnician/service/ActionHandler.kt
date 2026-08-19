@@ -1,4 +1,4 @@
-package com.technician.companion.service
+package com.lidar4.androidtechnician.service
 
 import android.content.Context
 import android.content.Intent
@@ -17,17 +17,15 @@ class ActionHandler(private val context: Context) {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     context.startActivity(intent)
-                    Pair("success", "Opened network settings safely for user verification.")
+                    Pair("requires_user_action", "Opened network settings for user verification.")
                 }
-
                 "open_display_settings" -> {
                     val intent = Intent(Settings.ACTION_DISPLAY_SETTINGS).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     context.startActivity(intent)
-                    Pair("success", "Opened display settings.")
+                    Pair("requires_user_action", "Opened display settings for user verification.")
                 }
-
                 "clear_app_cache_prompt" -> {
                     val intent = Intent(Settings.ACTION_APPLICATION_SETTINGS).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -35,20 +33,13 @@ class ActionHandler(private val context: Context) {
                     context.startActivity(intent)
                     Pair("requires_user_action", "Opened application settings for user-managed cache clearing.")
                 }
-
                 "destructive_factory_reset_request" -> {
-                    // Never perform a factory reset silently. Open the standard system
-                    // reset/settings surface and require the user to complete it locally.
                     val intent = Intent(Settings.ACTION_PRIVACY_SETTINGS).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     context.startActivity(intent)
-                    Pair(
-                        "requires_user_action",
-                        "Factory reset requires explicit physical user confirmation in Android settings."
-                    )
+                    Pair("requires_user_action", "Factory reset requires explicit physical confirmation in Android settings.")
                 }
-
                 else -> Pair("failed", "Unsupported or unrecognized action ID: $actionId")
             }
         } catch (e: Exception) {
