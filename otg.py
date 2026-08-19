@@ -1,9 +1,21 @@
 import os
+import re
 import subprocess
-from dataclasses import asdict, dataclass
-from typing import Optional
+from dataclasses import asdict, dataclass, field
+from typing import Dict, List, Optional
 
 import google.generativeai as genai
+
+
+@dataclass
+class CheckResult:
+    name: str
+    status: str
+    value: Optional[str] = None
+    error: Optional[str] = None
+
+    def to_dict(self):
+        return asdict(self)
 
 
 @dataclass
@@ -14,25 +26,16 @@ class DeviceReport:
     manufacturer: Optional[str] = None
     android_version: Optional[str] = None
     sdk: Optional[str] = None
-    battery: Optional[str] = None
-    storage: Optional[str] = None
-    ram: Optional[str] = None
-    wifi: Optional[str] = None
-    mobile_data: Optional[str] = None
-    connectivity: Optional[str] = None
-    ip_addresses: Optional[str] = None
-    diagnostics_errors: Optional[dict] = None
+    checks: List[CheckResult] = field(default_factory=list)
 
     def to_dict(self):
-        return asdict(self)
+        data = asdict(self)
+        data["checks"] = [c.to_dict() for c in self.checks]
+        return data
 
 
 class OTGAIPhoneController:
-    """Read-only Android diagnostics with AI-assisted analysis.
-
-    AI output is analysis only in this phase. No AI-generated shell command
-    is executed automatically.
-    """
+    """Authorized-device, read-only Android diagnostics with AI analysis."""
 
     def __init__(self):
         self.api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -47,14 +50,10 @@ class OTGAIPhoneController:
             command += ["-s", serial]
         command += list(args)
         return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
+            command, capture_output=True, text=True, timeout=15, check=False
         )
 
-    def check_adb_connection(self):
+    def check_adb_connection(self) -> List[str]:
         try:
             result = self._adb("devices")
             devices = []
@@ -66,99 +65,97 @@ class OTGAIPhoneController:
         except (FileNotFoundError, subprocess.SubprocessError):
             return []
 
-    def _prop(self, serial: str, name: str):
+    def _prop(self, serial: str, name: str) -> CheckResult:
         try:
             result = self._adb("shell", "getprop", name, serial=serial)
-            return result.stdout.strip() if result.returncode == 0 else None
-        except subprocess.SubprocessError:
-            return None
-
-    def _output(self, serial: str, *args: str):
-        try:
-            result = self._adb("shell", *args, serial=serial)
             if result.returncode == 0:
-                return result.stdout.strip() or None
-            return None
-        except subprocess.SubprocessError:
-            return None
-
-    def _checked_output(self, serial: str, *args: str):
-        """Return command output plus a small, non-sensitive error marker."""
-        try:
-            result = self._adb("shell", *args, serial=serial)
-            if result.returncode == 0:
-                return result.stdout.strip() or None, None
-            return None, (result.stderr.strip() or f"exit code {result.returncode}")
-        except subprocess.TimeoutExpired:
-            return None, "command timed out"
+                return CheckResult(name, "ok", result.stdout.strip() or None)
+            return CheckResult(name, "error", error=result.stderr.strip() or "ADB command failed")
         except subprocess.SubprocessError as exc:
-            return None, str(exc)
+            return CheckResult(name, "error", error=str(exc))
 
-    def collect_report(self, serial=None):
+    def _output(self, serial: str, name: str, *args: str) -> CheckResult:
+        try:
+            result = self._adb("shell", *args, serial=serial)
+            if result.returncode == 0:
+                return CheckResult(name, "ok", result.stdout.strip() or None)
+            return CheckResult(name, "error", error=result.stderr.strip() or "ADB command failed")
+        except subprocess.SubprocessError as exc:
+            return CheckResult(name, "error", error=str(exc))
+
+    def collect_report(self, serial: Optional[str] = None) -> DeviceReport:
         devices = self.check_adb_connection()
         serial = serial or (devices[0] if devices else None)
         if not serial:
             return DeviceReport(connected=False)
 
-        checks = {
-            "battery": ("dumpsys", "battery"),
-            "storage": ("df", "-h", "/data"),
-            "ram": ("cat", "/proc/meminfo"),
-            "wifi": ("cmd", "wifi", "status"),
-            "mobile_data": ("cmd", "phone", "get-data-state"),
-            "connectivity": ("dumpsys", "connectivity"),
-            "ip_addresses": ("ip", "addr", "show"),
-        }
-        values = {}
-        errors = {}
-        for key, command in checks.items():
-            value, error = self._checked_output(serial, *command)
-            values[key] = value
-            if error:
-                errors[key] = error
+        model = self._prop(serial, "ro.product.model")
+        manufacturer = self._prop(serial, "ro.product.manufacturer")
+        android = self._prop(serial, "ro.build.version.release")
+        sdk = self._prop(serial, "ro.build.version.sdk")
+
+        checks = [
+            self._output(serial, "battery", "dumpsys", "battery"),
+            self._output(serial, "storage", "df", "-h", "/data"),
+            self._output(serial, "memory", "cat", "/proc/meminfo"),
+            self._output(serial, "wifi", "cmd", "wifi", "status"),
+            self._output(serial, "mobile_data", "cmd", "phone", "get-data-state"),
+            self._output(serial, "connectivity", "dumpsys", "connectivity"),
+            self._output(serial, "ip_addresses", "ip", "addr", "show"),
+            self._output(serial, "telephony", "dumpsys", "telephony.registry"),
+            self._output(serial, "audio", "dumpsys", "audio"),
+            self._output(serial, "display", "wm", "size"),
+        ]
 
         return DeviceReport(
             connected=True,
             serial=serial,
-            model=self._prop(serial, "ro.product.model"),
-            manufacturer=self._prop(serial, "ro.product.manufacturer"),
-            android_version=self._prop(serial, "ro.build.version.release"),
-            sdk=self._prop(serial, "ro.build.version.sdk"),
-            battery=values["battery"],
-            storage=values["storage"],
-            ram=values["ram"],
-            wifi=values["wifi"],
-            mobile_data=values["mobile_data"],
-            connectivity=values["connectivity"],
-            ip_addresses=values["ip_addresses"],
-            diagnostics_errors=errors or None,
+            model=model.value,
+            manufacturer=manufacturer.value,
+            android_version=android.value,
+            sdk=sdk.value,
+            checks=checks,
         )
 
-    def diagnose(self, user_problem, report):
+    @staticmethod
+    def _redact_sensitive(text: str) -> str:
+        # Avoid sending obvious secrets/tokens from diagnostic output to an AI service.
+        patterns = [
+            r"(?i)(password|passwd|token|secret|api[_ -]?key)\s*[:=]\s*\S+",
+            r"(?i)\bBearer\s+[A-Za-z0-9._-]+",
+        ]
+        redacted = text
+        for pattern in patterns:
+            redacted = re.sub(pattern, lambda m: m.group(1) + ": [REDACTED]" if m.lastindex else "[REDACTED]", redacted)
+        return redacted
+
+    def diagnose(self, user_problem: str, report: Dict):
         if not self.model:
             return {
                 "status": "ai_unavailable",
                 "message": "GEMINI_API_KEY is not configured. The diagnostic report is still available.",
             }
 
+        safe_report = self._redact_sensitive(str(report))
         prompt = f"""
-You are a cautious Android technician assistant.
-The technician reported this problem: {user_problem}
+You are a cautious Android technician assistant for an authorized device.
+Technician problem: {user_problem}
 
-Authorized-device diagnostic evidence:
-{report}
+Read-only diagnostic evidence:
+{safe_report}
 
-Analyze only the supplied evidence. Return:
-1. likely causes, ranked
-2. confidence for each cause
-3. additional safe, read-only checks that would help
-4. a clear technician-friendly explanation
-5. whether a repair action would require user confirmation
+Return a concise structured analysis with:
+- summary
+- likely_causes (ranked, with confidence)
+- evidence
+- additional_safe_checks
+- recommended_next_step
+- repair_possible: yes/no/unknown
+- requires_user_confirmation: yes/no
 
-Do not invent unavailable information.
-Do not output shell commands or instructions for bypassing Android security.
-Do not claim a hardware or carrier fault unless the evidence supports it.
-If a diagnostic check failed or is unavailable, say so explicitly.
+Only use supplied evidence. Never invent device state.
+Do not output shell commands, credential material, or security-bypass instructions.
+Clearly distinguish software, configuration, network/carrier, and possible hardware causes.
 """
         try:
             response = self.model.generate_content(prompt)
@@ -170,7 +167,7 @@ If a diagnostic check failed or is unavailable, say so explicitly.
 if __name__ == "__main__":
     controller = OTGAIPhoneController()
     devices = controller.check_adb_connection()
-    print(f"[SYSTEM] Connected devices: {len(devices)}")
+    print(f"[SYSTEM] Connected authorized devices: {len(devices)}")
     report = controller.collect_report()
     print(report.to_dict())
     if devices:
