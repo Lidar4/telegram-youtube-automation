@@ -1,16 +1,10 @@
 {
-  "name": "free-messenger",
-  "version": "0.1.0",
+  "name": "nibhir-messenger",
+  "version": "1.0.0",
   "private": true,
-  "type": "module",
+  "description": "Original login-free room-based messenger foundation",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "@supabase/supabase-js": "latest",
-    "vite": "latest"
-  },
-  "devDependencies": {}
+    "dev": "python3 -m http.server 4173",
+    "start": "python3 -m http.server 4173"
+  }
 }
