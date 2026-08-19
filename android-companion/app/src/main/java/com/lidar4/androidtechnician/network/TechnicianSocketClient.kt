@@ -8,7 +8,9 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import java.util.concurrent.TimeUnit
 
-class TechnicianSocketClient {
+class TechnicianSocketClient(
+    private val onMessage: (String) -> Unit = {}
+) {
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(true)
@@ -23,9 +25,15 @@ class TechnicianSocketClient {
                 Log.d(TAG, "Connected to technician host")
                 sendEvent("status", "companion_connected")
             }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                onMessage(text)
+            }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "Disconnected: $code $reason")
             }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
                 Log.e(TAG, "Connection error", t)
             }
@@ -37,14 +45,20 @@ class TechnicianSocketClient {
         webSocket?.send("{\"type\":\"$type\",\"message\":\"$escaped\",\"timestamp\":${System.currentTimeMillis()}}")
     }
 
+    fun sendJson(json: String) {
+        webSocket?.send(json)
+    }
+
     fun sendFrame(bytes: ByteArray) {
         webSocket?.send(ByteString.of(*bytes))
     }
 
     fun disconnect() {
-        webSocket?.close(1000, "screen sharing stopped")
+        webSocket?.close(1000, "connection stopped")
         webSocket = null
     }
 
-    companion object { private const val TAG = "TechnicianSocket" }
+    companion object {
+        private const val TAG = "TechnicianSocket"
+    }
 }
