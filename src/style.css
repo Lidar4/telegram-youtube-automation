@@ -1,0 +1,21 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f3f4f6; color: #111827; }
+button, input { font: inherit; }
+.shell { width: min(760px, 100%); min-height: 100vh; margin: auto; background: white; display: flex; flex-direction: column; }
+.topbar { padding: 18px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb; }
+h1 { margin: 0; font-size: 22px; }
+p { margin: 4px 0 0; color: #6b7280; font-size: 13px; }
+button { border: 0; border-radius: 10px; padding: 10px 14px; background: #111827; color: white; cursor: pointer; }
+.room-card { margin: 16px; padding: 14px; border: 1px solid #e5e7eb; border-radius: 14px; display: flex; align-items: center; gap: 12px; }
+.room-card span { color: #6b7280; }
+.room-card strong { font-size: 20px; letter-spacing: 2px; margin-right: auto; }
+.chat { flex: 1; display: flex; flex-direction: column; min-height: 60vh; }
+.messages { flex: 1; overflow-y: auto; padding: 18px; background: #f9fafb; }
+.empty { text-align: center; color: #9ca3af; padding: 50px 20px; }
+.message { width: fit-content; max-width: 80%; padding: 10px 13px; border-radius: 15px; margin: 8px 0; word-break: break-word; }
+.mine { margin-left: auto; background: #111827; color: white; border-bottom-right-radius: 4px; }
+.theirs { background: #e5e7eb; border-bottom-left-radius: 4px; }
+.composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #e5e7eb; }
+.composer input { flex: 1; border: 1px solid #d1d5db; border-radius: 12px; padding: 12px; outline: none; }
+.status { padding: 0 16px 16px; }
+@media (max-width: 520px) { .room-card { flex-wrap: wrap; } .room-card strong { margin-right: 0; } }
