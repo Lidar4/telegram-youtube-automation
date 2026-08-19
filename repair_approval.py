@@ -40,19 +40,10 @@ class RepairPlan:
 
 
 class RepairApprovalManager:
-    """In-memory, confirmation-first repair plan store.
-
-    This module creates and tracks approval state only. It does not execute
-    Android commands or bypass device/user authorization.
-    """
+    """Confirmation-first repair-plan store; never executes device commands."""
 
     ALLOWED_STATUSES = {
-        "pending",
-        "approved",
-        "rejected",
-        "executing",
-        "completed",
-        "failed",
+        "pending", "approved", "rejected", "executing", "completed", "failed"
     }
 
     def __init__(self):
@@ -75,17 +66,20 @@ class RepairApprovalManager:
             lowered = f"{action_id} {description}".lower()
             if action_id in BLOCKED_ACTIONS or any(
                 term in lowered
-                for term in ("security bypass", "credential access", "lockscreen bypass", "silent factory reset")
+                for term in (
+                    "security bypass",
+                    "credential access",
+                    "lockscreen bypass",
+                    "silent factory reset",
+                )
             ):
                 continue
 
             risk = str(raw.get("risk", "high")).lower()
             if risk not in {"low", "medium", "high"}:
                 risk = "high"
-
             reversible = bool(raw.get("reversible", False))
             requires_device_confirmation = bool(raw.get("requires_device_confirmation", False))
-            # High-risk or irreversible actions must require device confirmation.
             if risk == "high" or not reversible:
                 requires_device_confirmation = True
 
@@ -99,19 +93,20 @@ class RepairApprovalManager:
                 )
             )
 
+        overall_risk = str(diagnosis_data.get("overall_risk", "high")).lower()
+        if overall_risk not in {"low", "medium", "high"}:
+            overall_risk = "high"
+
         plan = RepairPlan(
             approval_id=approval_id,
             problem=str(diagnosis_data.get("problem", "Unknown diagnostic issue")),
             summary=str(diagnosis_data.get("summary", "Automated AI repair evaluation.")),
             actions=actions,
-            risk=str(diagnosis_data.get("overall_risk", "high")).lower(),
+            risk=overall_risk,
             reversible=bool(diagnosis_data.get("reversible", False)),
             confirmation_required=True,
             status="pending",
         )
-        if plan.risk not in {"low", "medium", "high"}:
-            plan.risk = "high"
-
         with self._lock:
             self._store[approval_id] = plan
         return plan
@@ -131,4 +126,30 @@ class RepairApprovalManager:
             return True
 
 
-approval_manager = RepairApprovalManager()
+class RepairApprovalStore:
+    """Compatibility facade for the existing repair API/routes."""
+
+    def __init__(self, manager: Optional[RepairApprovalManager] = None):
+        self.manager = manager or RepairApprovalManager()
+
+    def create(self, problem: str, summary: str, actions: list) -> RepairPlan:
+        return self.manager.create_plan_from_ai({
+            "problem": problem,
+            "summary": summary,
+            "actions": actions,
+            "confirmation_required": True,
+        })
+
+    def get(self, approval_id: str) -> Optional[RepairPlan]:
+        return self.manager.get_plan(approval_id)
+
+    def decide(self, approval_id: str, approved: bool) -> Optional[RepairPlan]:
+        plan = self.manager.get_plan(approval_id)
+        if plan is None or plan.status != "pending":
+            return None
+        self.manager.update_status(approval_id, "approved" if approved else "rejected")
+        return self.manager.get_plan(approval_id)
+
+
+approval_store = RepairApprovalStore()
+approval_manager = approval_store.manager
