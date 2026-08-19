@@ -1,14 +1,22 @@
-# Free Messenger
+# Nibhir Messenger
 
-A no-login, room-code communication app. The first commit provides the responsive chat UI and local message prototype.
+A lightweight, original, login-free communication app foundation.
 
-## Planned free internet mode
+## Current
+- No account or password login
+- Create or join a room with a short code
+- Local message history for the current device
+- Responsive mobile-first chat UI
+- Message edit/delete/copy/reply UI
+- Attachment picker UI
+- Dark/light theme toggle
+- Room sharing/copy-code controls
 
-- Supabase free-tier database/realtime transport
-- No email/password login
-- Random device/session identity
-- Room-code or QR-based joining
-- Realtime text messages
-- Later: image/file/voice messages, message edit/delete, PWA and Android packaging
+## Planned realtime layer
+The next stage will connect rooms to a free-tier realtime backend (for example Supabase Realtime). No secret key is stored in this repository. The app is designed so the public project URL and publishable/anon client key can be supplied at deployment time.
 
-No secrets are stored in this repository. Supabase project URL and anon key will be supplied through environment variables in the next implementation step.
+## Important
+This project is an original implementation. It does not copy another app's proprietary source code or assets.
+
+## Run
+Open `index.html` in a modern browser, or serve the repository with any static web server.
