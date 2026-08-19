@@ -1,0 +1,9 @@
+{
+  "name": "Nibhir Messenger",
+  "short_name": "Nibhir",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "description": "A clean private room messenger."
+}
