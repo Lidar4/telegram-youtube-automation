@@ -28,6 +28,7 @@ class ScreenShareService : LifecycleService() {
     private var imageReader: ImageReader? = null
     private var socketClient: TechnicianSocketClient? = null
     private var lastFrameAt = 0L
+    private val actionHandler by lazy { ActionHandler(this) }
 
     companion object {
         const val ACTION_START = "com.lidar4.androidtechnician.action.START"
@@ -105,15 +106,23 @@ class ScreenShareService : LifecycleService() {
     private fun handleHostMessage(text: String) {
         try {
             val message = JSONObject(text)
-            if (message.optString("type") != "diagnostic_request") return
-
-            val requestId = message.optString("request_id")
-            val problem = message.optString("problem")
-            if (requestId.isBlank()) {
-                socketClient?.sendEvent("error", "diagnostic_request_missing_id")
-                return
+            when (message.optString("type")) {
+                "diagnostic_request" -> handleDiagnosticRequest(message)
+                "repair_request" -> handleRepairRequest(message)
             }
+        } catch (e: Exception) {
+            socketClient?.sendEvent("error", "host_message_error: ${e.message ?: "unknown"}")
+        }
+    }
 
+    private fun handleDiagnosticRequest(message: JSONObject) {
+        val requestId = message.optString("request_id")
+        val problem = message.optString("problem")
+        if (requestId.isBlank()) {
+            socketClient?.sendEvent("error", "diagnostic_request_missing_id")
+            return
+        }
+        try {
             socketClient?.sendEvent("status", "diagnostic_started")
             val report = DiagnosticCollector(this).collect(requestId, problem)
             socketClient?.sendJson(report)
@@ -121,6 +130,53 @@ class ScreenShareService : LifecycleService() {
         } catch (e: Exception) {
             socketClient?.sendEvent("error", "diagnostic_request_error: ${e.message ?: "unknown"}")
         }
+    }
+
+    private fun handleRepairRequest(message: JSONObject) {
+        val approvalId = message.optString("approval_id")
+        val actions = message.optJSONArray("actions")
+        if (approvalId.isBlank() || actions == null) {
+            socketClient?.sendEvent("repair_result", "invalid_repair_request")
+            return
+        }
+
+        socketClient?.sendEvent("status", "repair_started:$approvalId")
+        var overallStatus = "success"
+        var overallMessage = "Approved repair actions processed."
+
+        for (i in 0 until actions.length()) {
+            val action = actions.optJSONObject(i) ?: continue
+            val (status, messageText) = actionHandler.executeAction(action)
+            socketClient?.sendJson(
+                JSONObject()
+                    .put("type", "repair_result")
+                    .put("approval_id", approvalId)
+                    .put("action_id", action.optString("id", "unknown"))
+                    .put("status", status)
+                    .put("message", messageText)
+                    .toString()
+            )
+            if (status == "failed") {
+                overallStatus = "failed"
+                overallMessage = messageText
+                break
+            }
+            if (status == "requires_user_action") {
+                overallStatus = "requires_user_action"
+                overallMessage = messageText
+            }
+        }
+
+        socketClient?.sendJson(
+            JSONObject()
+                .put("type", "repair_result")
+                .put("approval_id", approvalId)
+                .put("status", overallStatus)
+                .put("message", overallMessage)
+                .put("completed", overallStatus == "success")
+                .toString()
+        )
+        socketClient?.sendEvent("status", "repair_finished:$approvalId:$overallStatus")
     }
 
     private fun setupVirtualDisplay() {
