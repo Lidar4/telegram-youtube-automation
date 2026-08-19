@@ -24,6 +24,7 @@ last_screen_frame = None
 last_screen_event = {"type": "status", "message": "waiting_for_target"}
 last_target_status = {"connected": False, "message": "waiting_for_target"}
 last_diagnostic_report = None
+last_ai_analysis = None
 
 DASHBOARD = """
 <!doctype html>
@@ -47,9 +48,9 @@ textarea{width:100%;min-height:120px;box-sizing:border-box;padding:12px;border:1
 <script>
 function esc(v){return String(v??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));}
 function render(r){const f=[['Model',r.device?.model],['Manufacturer',r.device?.manufacturer],['Android',r.device?.android_version],['SDK',r.device?.sdk],['Battery',r.battery?.level_percent===undefined?'—':r.battery.level_percent+'%'],['Network',r.network?.connected?'Connected':'Not connected'],['Wi-Fi',r.network?.transport_wifi?'Yes':'No'],['Cellular',r.network?.transport_cellular?'Yes':'No'],['Storage used',r.storage?.used_percent===undefined?'—':r.storage.used_percent+'%']];document.getElementById('summary').innerHTML=f.map(([k,v])=>`<div class="stat"><strong>${esc(k)}</strong>${esc(v)}</div>`).join('');document.getElementById('checks').innerHTML=`<pre>${esc(JSON.stringify(r,null,2))}</pre>`;}
-async function refresh(){try{const d=await fetch('/api/target/status').then(r=>r.json());const s=document.getElementById('status');s.textContent=d.connected?'Target connected':'Target not connected';s.className='badge '+(d.connected?'online':'offline');document.getElementById('targetStatus').textContent=JSON.stringify(d,null,2);if(d.report)render(d.report);}catch(e){document.getElementById('status').textContent='Dashboard error';document.getElementById('status').className='badge offline';}}
+async function refresh(){try{const d=await fetch('/api/target/status').then(r=>r.json());const s=document.getElementById('status');s.textContent=d.connected?'Target connected':'Target not connected';s.className='badge '+(d.connected?'online':'offline');document.getElementById('targetStatus').textContent=JSON.stringify(d,null,2);if(d.report)render(d.report);if(d.ai_analysis?.message)document.getElementById('answer').textContent=d.ai_analysis.message;}catch(e){document.getElementById('status').textContent='Dashboard error';document.getElementById('status').className='badge offline';}}
 async function diagnose(){const problem=document.getElementById('problem').value.trim();if(!problem)return;document.getElementById('answer').textContent='Requesting target diagnostics…';try{const r=await fetch('/api/diagnostics/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem})}).then(x=>x.json());if(!r.ok){document.getElementById('answer').textContent=r.error||'Diagnostic request failed.';return;}document.getElementById('answer').textContent='Diagnostic request sent. Waiting for target report…';}catch(e){document.getElementById('answer').textContent='Request failed: '+e.message;}}
-function connectScreen(){const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/ws/viewer`);ws.binaryType='arraybuffer';ws.onopen=()=>document.getElementById('screenEvent').textContent='Viewer connected. Waiting for target screen…';ws.onmessage=e=>{if(typeof e.data==='string'){try{const msg=JSON.parse(e.data);document.getElementById('screenEvent').textContent=`${msg.type}: ${msg.message||''}`;document.getElementById('targetStatus').textContent=JSON.stringify(msg,null,2);if(msg.type==='diagnostic_report'){render(msg);document.getElementById('answer').textContent='Diagnostic report received.';}}catch(_){}}else{const blob=new Blob([e.data],{type:'image/jpeg'});const url=URL.createObjectURL(blob);const img=document.getElementById('screen');img.onload=()=>URL.revokeObjectURL(url);img.src=url;img.hidden=false;document.getElementById('screenEvent').textContent='Live target screen';}};ws.onclose=()=>{document.getElementById('screenEvent').textContent='Viewer disconnected. Retrying…';setTimeout(connectScreen,1500);};ws.onerror=()=>ws.close();}
+function connectScreen(){const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/ws/viewer`);ws.binaryType='arraybuffer';ws.onopen=()=>document.getElementById('screenEvent').textContent='Viewer connected. Waiting for target screen…';ws.onmessage=e=>{if(typeof e.data==='string'){try{const msg=JSON.parse(e.data);document.getElementById('screenEvent').textContent=`${msg.type}: ${msg.message||''}`;document.getElementById('targetStatus').textContent=JSON.stringify(msg,null,2);if(msg.type==='diagnostic_report'){render(msg);document.getElementById('answer').textContent='Diagnostic report received. You can now ask the AI to analyze it.';}if(msg.type==='ai_analysis'){document.getElementById('answer').textContent=msg.message||'AI analysis received.';}}catch(_){}}else{const blob=new Blob([e.data],{type:'image/jpeg'});const url=URL.createObjectURL(blob);const img=document.getElementById('screen');img.onload=()=>URL.revokeObjectURL(url);img.src=url;img.hidden=false;document.getElementById('screenEvent').textContent='Live target screen';}};ws.onclose=()=>{document.getElementById('screenEvent').textContent='Viewer disconnected. Retrying…';setTimeout(connectScreen,1500);};ws.onerror=()=>ws.close();}
 refresh();connectScreen();setInterval(refresh,3000);
 </script></body></html>
 """
@@ -128,7 +129,7 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True, "service": "ai-android-technician", "version": "4"})
+    return jsonify({"ok": True, "service": "ai-android-technician", "version": "5"})
 
 
 @app.get("/api/devices")
@@ -141,6 +142,8 @@ def target_status():
     payload = dict(last_target_status)
     if last_diagnostic_report is not None:
         payload["report"] = last_diagnostic_report
+    if last_ai_analysis is not None:
+        payload["ai_analysis"] = last_ai_analysis
     return jsonify(payload)
 
 
@@ -166,6 +169,23 @@ def request_diagnostics():
         return jsonify({"error": "No connected companion is available"}), 503
     _broadcast(json.dumps({"type": "status", "message": "diagnostic_requested", "request_id": payload["request_id"]}))
     return jsonify({"ok": True, "request_id": payload["request_id"]})
+
+
+@app.post("/api/diagnostics/analyze")
+def analyze_diagnostics():
+    global last_ai_analysis
+    body = request.get_json(silent=True) or {}
+    problem = str(body.get("problem", "")).strip()
+    report = body.get("report") or last_diagnostic_report
+    if not problem:
+        return jsonify({"error": "problem is required"}), 400
+    if not isinstance(report, dict):
+        return jsonify({"error": "No diagnostic report is available yet"}), 409
+
+    last_ai_analysis = controller.diagnose(problem, report)
+    event = {"type": "ai_analysis", "message": last_ai_analysis.get("message", ""), "status": last_ai_analysis.get("status", "unknown")}
+    _broadcast(json.dumps(event))
+    return jsonify(last_ai_analysis)
 
 
 @sock.route("/ws/companion")
@@ -211,6 +231,8 @@ def viewer_socket(ws):
             ws.send(json.dumps(last_screen_event))
         if last_diagnostic_report:
             ws.send(json.dumps(last_diagnostic_report))
+        if last_ai_analysis:
+            ws.send(json.dumps({"type": "ai_analysis", **last_ai_analysis}))
         if last_screen_frame:
             ws.send(last_screen_frame)
         while True:
