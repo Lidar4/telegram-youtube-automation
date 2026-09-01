@@ -1,13 +1,33 @@
-from repair_api import approve_repair, create_repair_request, get_repair, reject_repair
+import sys
+import time
+from repair_api import RepairApiClient
 
+def main():
+    client = RepairApiClient()
+    print("=============================================")
+    print(" AI Android Remote Technician Console Monitor ")
+    print("=============================================")
+    
+    status = client.get_status()
+    if "error" in status:
+        print(f"[-] Status check failed: {status['error']}")
+        sys.exit(1)
 
-def repair_status(approval_id: str):
-    return get_repair(approval_id)
+    connected = status.get("connected", False)
+    message = status.get("message", "unknown")
+    print(f"[*] Target Connected: {connected}")
+    print(f"[*] Latest Event: {message}")
 
+    if "report" in status:
+        report = status["report"]
+        dev = report.get("device", {})
+        print(f"[*] Device Details: {dev.get('manufacturer', 'N/A')} {dev.get('model', 'N/A')} (Android {dev.get('android_version', 'N/A')})")
+        battery = report.get("battery", {})
+        print(f"[*] Battery Capacity: {battery.get('level_percent', 'N/A')}%")
+        network = report.get("network", {})
+        print(f"[*] Connectivity: Wifi={network.get('transport_wifi', False)} Cellular={network.get('transport_cellular', False)}")
+        
+    print("=============================================")
 
-def repair_approve(approval_id: str):
-    return approve_repair(approval_id)
-
-
-def repair_reject(approval_id: str):
-    return reject_repair(approval_id)
+if __name__ == "__main__":
+    main()

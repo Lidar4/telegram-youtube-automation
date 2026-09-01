@@ -92,7 +92,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {}
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                if (serviceInfo.serviceType != "_otgtech._tcp.") return
+                if (!serviceInfo.serviceType.contains("_otgtech")) return
                 manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
                     override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {}
                     override fun onServiceResolved(info: NsdServiceInfo) {

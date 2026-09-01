@@ -1,0 +1,12 @@
+{
+  "name": "AI Android Technician",
+  "description": "Authorized Android device diagnostics and AI-powered troubleshooting dashboard.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

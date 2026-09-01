@@ -1,58 +1,49 @@
-"""Safety-first repair planning helpers.
+import re
 
-This module deliberately creates plans only. It never executes device commands.
-The host UI/backend can use the returned plan to require explicit user approval
-before any future, narrowly-scoped repair action is attempted.
-"""
+class RepairPolicy:
+    # Forbidden terms that will immediately block an action from being created or dispatched
+    FORBIDDEN_PATTERNS = [
+        r"security[-_]?bypass",
+        r"credential[-_]?extraction",
+        r"lock[-_]?screen[-_]?bypass",
+        r"arbitrary[-_]?shell",
+        r"silent[-_]?factory[-_]?reset",
+        r"authentication[-_]?bypass",
+        r"root[-_]?device",
+        r"dump[-_]?passwords",
+        r"extract[-_]?keys",
+        r"bypass[-_]?auth"
+    ]
 
-from __future__ import annotations
+    # High-risk actions that require explicit manual user confirmation
+    HIGH_RISK_PATTERNS = [
+        r"factory[-_]?reset",
+        r"delete[-_]?user",
+        r"clear[-_]?all[-_]?data",
+        r"format",
+        r"uninstall[-_]?system",
+        r"modify[-_]?secure[-_]?settings"
+    ]
 
-from dataclasses import dataclass, asdict
-from typing import Any
+    @classmethod
+    def validate_action(cls, action_id, description):
+        """
+        Validates an action.
+        Returns:
+            (is_allowed, is_high_risk, reason)
+        """
+        combined = f"{action_id} {description}".lower()
 
+        # 1. Check for strictly forbidden patterns
+        for pattern in cls.FORBIDDEN_PATTERNS:
+            if re.search(pattern, combined):
+                return False, True, f"Blocked: Action violates safety boundaries (matched forbidden policy pattern '{pattern}')."
 
-BLOCKED_CATEGORIES = {
-    "security_bypass",
-    "credential_access",
-    "surveillance",
-    "data_destruction",
-    "factory_reset",
-    "arbitrary_shell",
-}
+        # 2. Check for high-risk patterns requiring confirmation
+        is_high_risk = False
+        for pattern in cls.HIGH_RISK_PATTERNS:
+            if re.search(pattern, combined):
+                is_high_risk = True
+                break
 
-
-@dataclass(frozen=True)
-class RepairPlan:
-    action_id: str
-    title: str
-    reason: str
-    risk: str
-    reversible: bool
-    requires_confirmation: bool = True
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-def build_repair_plan(action_id: str, title: str, reason: str, *, risk: str = "low", reversible: bool = True) -> dict[str, Any]:
-    """Return a confirmation-first plan; never execute an action."""
-    if action_id in BLOCKED_CATEGORIES:
-        return {
-            "status": "blocked",
-            "reason": "This action is outside the safe repair policy.",
-            "requires_confirmation": False,
-        }
-
-    normalized_risk = risk.lower().strip()
-    if normalized_risk not in {"low", "medium", "high"}:
-        normalized_risk = "high"
-
-    plan = RepairPlan(
-        action_id=action_id,
-        title=title,
-        reason=reason,
-        risk=normalized_risk,
-        reversible=bool(reversible),
-        requires_confirmation=True,
-    )
-    return {"status": "pending_approval", "plan": plan.to_dict()}
+        return True, is_high_risk, "Allowed"

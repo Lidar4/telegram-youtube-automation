@@ -1,246 +1,366 @@
-import atexit
-import json
 import os
+import json
+import uuid
+import time
 import socket
 import threading
-import time
-
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, request, jsonify, send_from_directory
 from flask_sock import Sock
-from zeroconf import ServiceInfo, Zeroconf
-
-from otg import OTGAIPhoneController
-from repair_dispatch import set_dispatcher
-from repair_routes import repair_bp
+from zeroconf import IPVersion, Info, Zeroconf
+from repair_approval import RepairApprovalManager, RepairPlanState
+from repair_dispatch import RepairDispatcher
+from otg import OTGDiagnosticHelper
 
 app = Flask(__name__)
 sock = Sock(app)
-app.register_blueprint(repair_bp)
-controller = OTGAIPhoneController()
-zeroconf = None
-service_info = None
-viewer_clients = set()
-viewer_lock = threading.Lock()
-companion_lock = threading.Lock()
-active_companion = None
+
+# Thread-safe in-memory state
+active_companion_ws = None
 last_screen_frame = None
 last_screen_event = {"type": "status", "message": "waiting_for_target"}
 last_target_status = {"connected": False, "message": "waiting_for_target"}
 last_diagnostic_report = None
 last_ai_analysis = None
 
-DASHBOARD = """
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI Android Technician</title>
-<style>
-:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#17181a;background:#f5f7fa}
-body{max-width:1100px;margin:0 auto;padding:20px}.card{background:#fff;border:1px solid #e1e5ea;border-radius:16px;padding:18px;margin:14px 0;box-shadow:0 2px 10px #0000000a}
-header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}.stat{padding:14px;border:1px solid #e5e7eb;border-radius:12px;background:#fafbfc}.stat strong{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#68707a;margin-bottom:5px}
-textarea{width:100%;min-height:120px;box-sizing:border-box;padding:12px;border:1px solid #cfd5dc;border-radius:10px;resize:vertical}button{font:inherit;padding:10px 15px;border:0;border-radius:10px;cursor:pointer;background:#e9edf2}.primary{background:#17181a;color:#fff}.danger{background:#8b1e1e;color:#fff}pre{white-space:pre-wrap;overflow:auto;background:#f4f5f7;padding:12px;border-radius:10px;max-height:420px}.badge{display:inline-block;padding:5px 9px;border-radius:999px;background:#eef1f4;font-size:13px}.online{background:#e7f7ed;color:#176b38}.offline{background:#fff0f0;color:#8b1e1e}
-.screen{display:flex;justify-content:center;background:#111;border-radius:12px;min-height:260px;overflow:hidden}.screen img{display:block;max-width:100%;max-height:620px;object-fit:contain}.event{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;background:#f4f5f7;border-radius:10px;padding:10px;margin-top:10px}
-</style></head><body>
-<header><div><h1>AI Android Technician</h1><small>Authorized device diagnostics + AI analysis</small></div><button onclick="refresh()">Refresh</button></header>
-<div class="card"><span id="status" class="badge">Checking target…</span><div id="summary" class="grid" style="margin-top:14px"></div></div>
-<div class="card"><h2>Target screen</h2><div class="screen"><img id="screen" alt="Target phone screen" hidden></div><div id="screenEvent" class="event">Waiting for target phone.</div></div>
-<div class="card"><h2>Target status</h2><pre id="targetStatus">Waiting for target phone.</pre></div>
-<div class="card"><h2>Diagnostic checks</h2><div id="checks">No report yet.</div></div>
-<div class="card"><h2>Ask the AI</h2><p><small>Describe a phone problem. The AI analyzes available read-only evidence and does not execute arbitrary commands.</small></p><textarea id="problem" placeholder="Example: Mobile data is not working. Find the likely cause."></textarea><br><button class="primary" onclick="diagnose()">Diagnose</button><pre id="answer">Waiting for your problem.</pre></div>
-<div class="card"><h2>Repair approval</h2><p><small>Only approved plans are dispatched. High-risk or irreversible actions require confirmation on the target device.</small></p><input id="approvalId" placeholder="Approval ID" style="padding:10px;width:220px"><button onclick="loadRepair()">Load</button><pre id="repairState">No repair plan loaded.</pre><button class="primary" onclick="decideRepair(true)">Approve</button> <button class="danger" onclick="decideRepair(false)">Reject</button></div>
-<script>
-function esc(v){return String(v??'—').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));}
-function render(r){const f=[['Model',r.device?.model],['Manufacturer',r.device?.manufacturer],['Android',r.device?.android_version],['SDK',r.device?.sdk],['Battery',r.battery?.level_percent===undefined?'—':r.battery.level_percent+'%'],['Network',r.network?.connected?'Connected':'Not connected'],['Wi-Fi',r.network?.transport_wifi?'Yes':'No'],['Cellular',r.network?.transport_cellular?'Yes':'No'],['Storage used',r.storage?.used_percent===undefined?'—':r.storage.used_percent+'%']];document.getElementById('summary').innerHTML=f.map(([k,v])=>`<div class="stat"><strong>${esc(k)}</strong>${esc(v)}</div>`).join('');document.getElementById('checks').innerHTML=`<pre>${esc(JSON.stringify(r,null,2))}</pre>`;}
-async function refresh(){try{const d=await fetch('/api/target/status').then(r=>r.json());const s=document.getElementById('status');s.textContent=d.connected?'Target connected':'Target not connected';s.className='badge '+(d.connected?'online':'offline');document.getElementById('targetStatus').textContent=JSON.stringify(d,null,2);if(d.report)render(d.report);if(d.ai_analysis?.message)document.getElementById('answer').textContent=d.ai_analysis.message;}catch(e){document.getElementById('status').textContent='Dashboard error';document.getElementById('status').className='badge offline';}}
-async function diagnose(){const problem=document.getElementById('problem').value.trim();if(!problem)return;document.getElementById('answer').textContent='Requesting target diagnostics…';try{const r=await fetch('/api/diagnostics/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({problem})}).then(x=>x.json());if(!r.ok){document.getElementById('answer').textContent=r.error||'Diagnostic request failed.';return;}document.getElementById('answer').textContent='Diagnostic request sent. Waiting for target report…';}catch(e){document.getElementById('answer').textContent='Request failed: '+e.message;}}
-async function loadRepair(){const id=document.getElementById('approvalId').value.trim();if(!id)return;const r=await fetch('/api/repair/'+encodeURIComponent(id));const d=await r.json();document.getElementById('repairState').textContent=JSON.stringify(d,null,2);}
-async function decideRepair(approved){const id=document.getElementById('approvalId').value.trim();if(!id)return;const r=await fetch('/api/repair/'+encodeURIComponent(id)+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({approved})});const d=await r.json();document.getElementById('repairState').textContent=JSON.stringify(d,null,2);}
-function connectScreen(){const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/ws/viewer`);ws.binaryType='arraybuffer';ws.onopen=()=>document.getElementById('screenEvent').textContent='Viewer connected. Waiting for target screen…';ws.onmessage=e=>{if(typeof e.data==='string'){try{const msg=JSON.parse(e.data);document.getElementById('screenEvent').textContent=`${msg.type}: ${msg.message||''}`;document.getElementById('targetStatus').textContent=JSON.stringify(msg,null,2);if(msg.type==='diagnostic_report'){render(msg);document.getElementById('answer').textContent='Diagnostic report received.';}if(msg.type==='ai_analysis'){document.getElementById('answer').textContent=msg.message||'AI analysis received.';}}catch(_){}}else{const blob=new Blob([e.data],{type:'image/jpeg'});const url=URL.createObjectURL(blob);const img=document.getElementById('screen');img.onload=()=>URL.revokeObjectURL(url);img.src=url;img.hidden=false;document.getElementById('screenEvent').textContent='Live target screen';}};ws.onclose=()=>{document.getElementById('screenEvent').textContent='Viewer disconnected. Retrying…';setTimeout(connectScreen,1500);};ws.onerror=()=>ws.close();}
-refresh();connectScreen();setInterval(refresh,3000);
-</script></body></html>
-"""
+viewer_clients = set()
+state_lock = threading.Lock()
 
+# Instantiate repair manager
+repair_manager = RepairApprovalManager()
 
-def _local_ip():
+# Zeroconf instance
+zeroconf_instance = None
+
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.connect(("192.0.2.1", 9))
-        ip = sock.getsockname()[0]
-        sock.close()
-        return ip
-    except OSError:
-        return "127.0.0.1"
-
-
-def _advertise_service():
-    global zeroconf, service_info
-    if zeroconf is not None:
-        return
-    port = int(os.environ.get("PORT", "5000"))
-    ip = _local_ip()
-    service_info = ServiceInfo(
-        "_otgtech._tcp.local.",
-        "AI Android Technician._otgtech._tcp.local.",
-        addresses=[socket.inet_aton(ip)],
-        port=port,
-        properties={"api": "/api/health", "version": "2", "ws": "/ws/companion"},
-    )
-    zeroconf = Zeroconf()
-    zeroconf.register_service(service_info)
-
-
-def _stop_service():
-    global zeroconf, service_info
-    if zeroconf is not None:
-        try:
-            if service_info is not None:
-                zeroconf.unregister_service(service_info)
-            zeroconf.close()
-        finally:
-            zeroconf = None
-            service_info = None
-
-
-def _broadcast(payload):
-    dead = []
-    with viewer_lock:
-        clients = list(viewer_clients)
-    for client in clients:
-        try:
-            client.send(payload)
-        except Exception:
-            dead.append(client)
-    if dead:
-        with viewer_lock:
-            for client in dead:
-                viewer_clients.discard(client)
-
-
-def _send_to_companion(payload):
-    with companion_lock:
-        companion = active_companion
-    if companion is None:
-        return False
-    try:
-        return bool(companion.send(json.dumps(payload)))
+        # Does not have to be reachable
+        s.connect(('10.255.255.255', 1))
+        IP = s.getsockname()[0]
     except Exception:
-        return False
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
 
+def start_zeroconf_advertising(port=3000):
+    global zeroconf_instance
+    try:
+        zeroconf_instance = Zeroconf()
+        ip_addr = get_local_ip()
+        info = Info(
+            "_otgtech._tcp.local.",
+            "AI Android Technician Service._otgtech._tcp.local.",
+            addresses=[socket.inet_aton(ip_addr)],
+            port=port,
+            properties={},
+            server="otgtech.local."
+        )
+        zeroconf_instance.register_service(info)
+        print(f"[Zeroconf] Service registered successfully on {ip_addr}:{port}")
+    except Exception as e:
+        print(f"[Zeroconf] Service advertisement registration failed: {str(e)}")
 
-set_dispatcher(_send_to_companion)
+def stop_zeroconf_advertising():
+    global zeroconf_instance
+    if zeroconf_instance:
+        try:
+            zeroconf_instance.unregister_all_services()
+            zeroconf_instance.close()
+            print("[Zeroconf] Services unregistered and shut down.")
+        except Exception as e:
+            print(f"[Zeroconf] Shutdown error: {str(e)}")
 
+# Broadcaster helper
+def broadcast_to_viewers(data, is_binary=False):
+    with state_lock:
+        closed_viewers = set()
+        for client in list(viewer_clients):
+            try:
+                client.send(data)
+            except Exception:
+                closed_viewers.add(client)
+        for closed in closed_viewers:
+            viewer_clients.discard(closed)
 
-@app.get("/")
-def index():
-    return render_template_string(DASHBOARD)
+# --- FLASK API ROUTES ---
 
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    return jsonify({"ok": True, "service": "python-flask-android-technician", "version": "1.0"})
 
-@app.get("/api/health")
-def health():
-    return jsonify({"ok": True, "service": "ai-android-technician", "version": "5"})
+@app.route("/api/devices", methods=["GET"])
+def api_devices():
+    return jsonify({"devices": []})
 
+@app.route("/api/target/status", methods=["GET"])
+def api_target_status():
+    with state_lock:
+        payload = dict(last_target_status)
+        if last_diagnostic_report:
+            payload["report"] = last_diagnostic_report
+        if last_ai_analysis:
+            payload["ai_analysis"] = last_ai_analysis
+        return jsonify(payload)
 
-@app.get("/api/devices")
-def devices():
-    return jsonify({"devices": controller.check_adb_connection()})
+@app.route("/api/diagnostics", methods=["GET"])
+def api_diagnostics():
+    with state_lock:
+        if last_diagnostic_report:
+            return jsonify(last_diagnostic_report)
+        return jsonify({"error": "No diagnostics report collected yet."}), 404
 
-
-@app.get("/api/target/status")
-def target_status():
-    payload = dict(last_target_status)
-    if last_diagnostic_report is not None:
-        payload["report"] = last_diagnostic_report
-    if last_ai_analysis is not None:
-        payload["ai_analysis"] = last_ai_analysis
-    return jsonify(payload)
-
-
-@app.get("/api/diagnostics")
-def diagnostics():
-    serial = request.args.get("serial")
-    return jsonify(controller.collect_report(serial).to_dict())
-
-
-@app.post("/api/diagnostics/request")
-def request_diagnostics():
-    body = request.get_json(silent=True) or {}
-    problem = str(body.get("problem", "")).strip()
+@app.route("/api/diagnostics/request", methods=["POST"])
+def api_diagnostics_request():
+    global active_companion_ws
+    body = request.json or {}
+    problem = body.get("problem", "").strip()
     if not problem:
         return jsonify({"error": "problem is required"}), 400
-    payload = {"type": "diagnostic_request", "request_id": os.urandom(8).hex(), "problem": problem, "timestamp": int(time.time() * 1000)}
-    if not _send_to_companion(payload):
-        return jsonify({"error": "No connected companion is available"}), 503
-    _broadcast(json.dumps({"type": "status", "message": "diagnostic_requested", "request_id": payload["request_id"]}))
-    return jsonify({"ok": True, "request_id": payload["request_id"]})
 
+    request_id = uuid.uuid4().hex[:16]
+    payload = {
+        "type": "diagnostic_request",
+        "request_id": request_id,
+        "problem": problem,
+        "timestamp": int(time.time() * 1000)
+    }
 
-@app.post("/api/diagnostics/analyze")
-def analyze_diagnostics():
+    with state_lock:
+        if not active_companion_ws:
+            return jsonify({"error": "No connected companion is available"}), 503
+        try:
+            active_companion_ws.send(json.dumps(payload))
+            broadcast_to_viewers(json.dumps({
+                "type": "status",
+                "message": f"diagnostic_requested",
+                "request_id": request_id
+            }))
+            return jsonify({"ok": True, "request_id": request_id})
+        except Exception as e:
+            return jsonify({"error": f"Failed to transmit request: {str(e)}"}), 500
+
+@app.route("/api/diagnostics/analyze", methods=["POST"])
+def api_diagnostics_analyze():
     global last_ai_analysis
-    body = request.get_json(silent=True) or {}
-    problem = str(body.get("problem", "")).strip()
+    body = request.json or {}
+    problem = body.get("problem", "").strip()
     report = body.get("report") or last_diagnostic_report
+
     if not problem:
         return jsonify({"error": "problem is required"}), 400
-    if not isinstance(report, dict):
+    if not report:
         return jsonify({"error": "No diagnostic report is available yet"}), 409
-    last_ai_analysis = controller.diagnose(problem, report)
-    _broadcast(json.dumps({"type": "ai_analysis", "message": last_ai_analysis.get("message", ""), "status": last_ai_analysis.get("status", "unknown")}))
-    return jsonify(last_ai_analysis)
 
+    # Trigger expert Gemini analysis
+    analysis_res = OTGDiagnosticHelper.run_ai_analysis(problem, report)
+    with state_lock:
+        last_ai_analysis = analysis_res
+
+    broadcast_to_viewers(json.dumps({
+        "type": "ai_analysis",
+        "message": analysis_res.get("message", ""),
+        "status": analysis_res.get("status", "failed")
+    }))
+
+    return jsonify(analysis_res)
+
+@app.route("/api/repair/requests", methods=["POST"])
+def api_create_repair_request():
+    body = request.json or {}
+    problem = body.get("problem", "").strip()
+    summary = body.get("summary", "").strip()
+    actions = body.get("actions", [])
+
+    if not problem or not summary:
+        return jsonify({"error": "problem and summary are required"}), 400
+
+    approval_id = uuid.uuid4().hex[:8]
+    
+    # Analyze risk and reversibility
+    has_high_risk = any(act.get("risk") == "high" for act in actions)
+    reversible = all(act.get("reversible", True) for act in actions)
+    risk_level = "high" if has_high_risk else "medium"
+
+    plan = repair_manager.create_plan(
+        approval_id=approval_id,
+        problem=problem,
+        summary=summary,
+        actions=actions,
+        risk=risk_level,
+        reversible=reversible
+    )
+    return jsonify(plan), 201
+
+@app.route("/api/repair/<approval_id>", methods=["GET"])
+def api_get_repair_plan(approval_id):
+    plan = repair_manager.get_plan(approval_id)
+    if not plan:
+        return jsonify({"error": "approval request not found"}), 404
+    return jsonify(plan)
+
+@app.route("/api/repair/<approval_id>/decision", methods=["POST"])
+def api_repair_decision(approval_id):
+    global active_companion_ws
+    body = request.json or {}
+    approved = body.get("approved")
+
+    if not isinstance(approved, bool):
+        return jsonify({"error": "approved must be a boolean"}), 400
+
+    plan = repair_manager.get_plan(approval_id)
+    if not plan:
+        return jsonify({"error": "approval request not found"}), 404
+
+    if plan["status"] != RepairPlanState.PENDING:
+        return jsonify({"error": f"approval is already {plan['status']}"}), 409
+
+    if not approved:
+        updated = repair_manager.update_status(approval_id, RepairPlanState.REJECTED)
+        return jsonify(updated)
+
+    # Prepare dispatch
+    dispatch_payload = RepairDispatcher.prepare_dispatch(plan)
+    if not dispatch_payload["ok"]:
+        repair_manager.update_status(approval_id, RepairPlanState.FAILED)
+        return jsonify({"error": dispatch_payload["reason"]}), 422
+
+    with state_lock:
+        if not active_companion_ws:
+            repair_manager.update_status(approval_id, RepairPlanState.FAILED)
+            return jsonify({"error": "No connected companion is available"}), 503
+
+        try:
+            active_companion_ws.send(json.dumps(dispatch_payload["payload"]))
+            updated = repair_manager.update_status(
+                approval_id,
+                RepairPlanState.DISPATCHED,
+                dispatch_status="sent_to_companion"
+            )
+            return jsonify(updated)
+        except Exception as e:
+            repair_manager.update_status(approval_id, RepairPlanState.FAILED)
+            return jsonify({"error": f"Failed to dispatch repair action: {str(e)}"}), 500
+
+# --- WEBSOCKET SOCKET.IO ROUTES ---
 
 @sock.route("/ws/companion")
-def companion_socket(ws):
-    global active_companion, last_screen_frame, last_screen_event, last_target_status, last_diagnostic_report
-    with companion_lock:
-        active_companion = ws
-    last_target_status = {"connected": True, "message": "target_connected"}
-    _broadcast(json.dumps({"type": "status", "message": "target_connected"}))
-    try:
-        while True:
-            message = ws.receive()
-            if message is None:
-                break
-            if isinstance(message, bytes):
-                last_screen_frame = message
-                _broadcast(message)
-            else:
-                try:
-                    event = json.loads(message)
-                except json.JSONDecodeError:
-                    event = {"type": "event", "message": str(message)}
-                last_screen_event = event
-                if event.get("type") == "diagnostic_report":
-                    last_diagnostic_report = event
-                last_target_status = {"connected": True, **event}
-                _broadcast(json.dumps(event))
-    finally:
-        with companion_lock:
-            if active_companion is ws:
-                active_companion = None
-        last_target_status = {"connected": False, "message": "target_disconnected"}
+def companion_ws_handler(ws):
+    global active_companion_ws, last_target_status, last_diagnostic_report
+    print("[WS] Companion socket connected")
+    with state_lock:
+        active_companion_ws = ws
+        last_target_status = {"connected": True, "message": "target_connected"}
+    
+    broadcast_to_viewers(json.dumps({"type": "status", "message": "target_connected"}))
 
+    while True:
+        try:
+            data = ws.receive()
+            if not data:
+                break
+
+            # Check if binary (frame screenshots)
+            if isinstance(data, (bytes, bytearray)):
+                # Store and forward binary frame
+                with state_lock:
+                    global last_screen_frame
+                    last_screen_frame = data
+                broadcast_to_viewers(data, is_binary=True)
+            else:
+                # Text Frame
+                try:
+                    event = json.loads(data)
+                except Exception:
+                    event = {"type": "event", "message": data}
+
+                with state_lock:
+                    global last_screen_event
+                    last_screen_event = event
+                    if event.get("type") == "diagnostic_report":
+                        last_diagnostic_report = event
+                    
+                    # Update status
+                    last_target_status = dict(event)
+                    last_target_status["connected"] = True
+
+                    # Check for individual action results
+                    if event.get("type") == "repair_result":
+                        app_id = event.get("approval_id")
+                        act_id = event.get("action_id")
+                        status = event.get("status")
+                        msg = event.get("message")
+                        if app_id and act_id:
+                            repair_manager.update_action_result(app_id, act_id, status, msg)
+                        
+                        # Lifecycle transition: requires_user_action / executing / completed / failed
+                        if status == "requires_user_action":
+                            repair_manager.update_status(app_id, RepairPlanState.REQUIRES_USER_ACTION)
+                        elif status == "failed":
+                            repair_manager.update_status(app_id, RepairPlanState.FAILED)
+                        elif event.get("completed") is True:
+                            repair_manager.update_status(app_id, RepairPlanState.COMPLETED)
+
+                broadcast_to_viewers(data, is_binary=False)
+        except Exception as e:
+            print(f"[WS] Companion socket exception: {str(e)}")
+            break
+
+    print("[WS] Companion socket disconnected")
+    with state_lock:
+        if active_companion_ws == ws:
+            active_companion_ws = None
+        last_target_status = {"connected": False, "message": "target_disconnected"}
+    broadcast_to_viewers(json.dumps({"type": "status", "message": "target_disconnected"}))
 
 @sock.route("/ws/viewer")
-def viewer_socket(ws):
-    with viewer_lock:
+def viewer_ws_handler(ws):
+    print("[WS] Viewer socket connected")
+    with state_lock:
         viewer_clients.add(ws)
+        # Bootstrap new viewer client with latest known frames and states
+        current_frame = last_screen_frame
+        current_event = last_screen_event
+        current_status = last_target_status
+
+    if current_frame:
+        try:
+            ws.send(current_frame)
+        except Exception:
+            pass
+    if current_event:
+        try:
+            ws.send(json.dumps(current_event))
+        except Exception:
+            pass
     try:
-        if last_screen_frame is not None:
-            ws.send(last_screen_frame)
-        ws.send(json.dumps(last_screen_event))
-        while True:
-            if ws.receive() is None:
+        ws.send(json.dumps({"type": "status", **current_status}))
+    except Exception:
+        pass
+
+    while True:
+        try:
+            # Viewers are read-only from companion perspective; keep link alive
+            data = ws.receive()
+            if not data:
                 break
-    finally:
-        with viewer_lock:
-            viewer_clients.discard(ws)
+        except Exception:
+            break
 
+    with state_lock:
+        viewer_clients.discard(ws)
+    print("[WS] Viewer socket disconnected")
 
-atexit.register(_stop_service)
+# Serve the compiled React static SPA in production
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_spa(path):
+    dist_dir = os.path.join(os.getcwd(), "dist")
+    if not path or not os.path.exists(os.path.join(dist_dir, path)):
+        return send_from_directory(dist_dir, "index.html")
+    return send_from_directory(dist_dir, path)
 
 if __name__ == "__main__":
-    _advertise_service()
-    port = int(os.environ.get("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    start_zeroconf_advertising(port=3000)
+    app.run(host="0.0.0.0", port=3000, threaded=True)
+    stop_zeroconf_advertising()

@@ -87,10 +87,25 @@ class ScreenShareService : LifecycleService() {
     }
 
     private fun startProjection(resultCode: Int, data: Intent, host: String, port: Int) {
+        // Safely clean up any existing projection/display/reader resources before starting
+        cleanupResources()
+
         socketClient?.disconnect()
         socketClient = TechnicianSocketClient { text -> handleHostMessage(text) }
         socketClient?.connect(host, port)
         socketClient?.sendEvent("status", "screen_sharing_started")
+
+        // Send a handshake event with device identification details immediately
+        try {
+            val handshake = JSONObject()
+                .put("type", "handshake")
+                .put("device_id", "${Build.MANUFACTURER}_${Build.MODEL}_${Build.ID}".replace(" ", "_"))
+                .put("manufacturer", Build.MANUFACTURER)
+                .put("model", Build.MODEL)
+                .put("android_version", Build.VERSION.RELEASE)
+                .put("sdk", Build.VERSION.SDK_INT)
+            socketClient?.sendJson(handshake.toString())
+        } catch (e: Exception) {}
 
         val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(resultCode, data)
@@ -103,15 +118,44 @@ class ScreenShareService : LifecycleService() {
         setupVirtualDisplay()
     }
 
+    private fun cleanupResources() {
+        try {
+            virtualDisplay?.release()
+        } catch (e: Exception) {}
+        virtualDisplay = null
+
+        try {
+            imageReader?.close()
+        } catch (e: Exception) {}
+        imageReader = null
+
+        try {
+            mediaProjection?.stop()
+        } catch (e: Exception) {}
+        mediaProjection = null
+    }
+
     private fun handleHostMessage(text: String) {
         try {
             val message = JSONObject(text)
             when (message.optString("type")) {
+                "pairing_challenge" -> handlePairingChallenge(message)
                 "diagnostic_request" -> handleDiagnosticRequest(message)
                 "repair_request" -> handleRepairRequest(message)
             }
         } catch (e: Exception) {
             socketClient?.sendEvent("error", "host_message_error: ${e.message ?: "unknown"}")
+        }
+    }
+
+    private fun handlePairingChallenge(message: JSONObject) {
+        val pin = message.optString("pin")
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(
+                this@ScreenShareService,
+                "Pairing Request PIN: $pin\nEnter this code in your Master Dashboard to authorize connection.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -200,9 +244,17 @@ class ScreenShareService : LifecycleService() {
         )
 
         imageReader?.setOnImageAvailableListener({ reader ->
+            val image = try {
+                reader.acquireLatestImage()
+            } catch (e: Exception) {
+                null
+            } ?: return@setOnImageAvailableListener
+
             val now = System.currentTimeMillis()
-            if (now - lastFrameAt < 150L) return@setOnImageAvailableListener
-            val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+            if (now - lastFrameAt < 150L) {
+                image.close() // Always close immediately to drain the ImageReader queue and prevent freeze
+                return@setOnImageAvailableListener
+            }
             try {
                 val plane = image.planes[0]
                 val bitmapWidth = width + (plane.rowStride - plane.pixelStride * width) / plane.pixelStride

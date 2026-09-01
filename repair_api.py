@@ -1,25 +1,45 @@
-from repair_approval import RepairApprovalStore
+import urllib.request
+import json
 
-store = RepairApprovalStore()
+class RepairApiClient:
+    def __init__(self, base_url="http://localhost:3000"):
+        self.base_url = base_url
 
+    def get_status(self):
+        try:
+            req = urllib.request.Request(f"{self.base_url}/api/target/status")
+            with urllib.request.urlopen(req) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            return {"error": str(e)}
 
-def create_repair_request(problem: str, summary: str, actions: list, device_id: str = "") -> dict:
-    approval = store.create(problem=problem, summary=summary, actions=actions)
-    data = approval.to_dict()
-    data["device_id"] = device_id
-    return data
+    def submit_repair_request(self, problem, summary, actions):
+        try:
+            data = json.dumps({
+                "problem": problem,
+                "summary": summary,
+                "actions": actions
+            }).encode('utf-8')
+            
+            req = urllib.request.Request(
+                f"{self.base_url}/api/repair/requests",
+                data=data,
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            return {"error": str(e)}
 
-
-def approve_repair(approval_id: str) -> dict | None:
-    approval = store.decide(approval_id, True)
-    return approval.to_dict() if approval else None
-
-
-def reject_repair(approval_id: str) -> dict | None:
-    approval = store.decide(approval_id, False)
-    return approval.to_dict() if approval else None
-
-
-def get_repair(approval_id: str) -> dict | None:
-    approval = store.get(approval_id)
-    return approval.to_dict() if approval else None
+    def send_decision(self, approval_id, approved: bool):
+        try:
+            data = json.dumps({"approved": approved}).encode('utf-8')
+            req = urllib.request.Request(
+                f"{self.base_url}/api/repair/{approval_id}/decision",
+                data=data,
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            return {"error": str(e)}

@@ -1,6 +1,6 @@
-google-generativeai
-protobuf
-pydantic
-flask
-flask-sock
-zeroconf
+flask==3.0.3
+flask-sock==2.1.1
+google-genai==0.1.1
+zeroconf==0.132.2
+python-dotenv==1.0.1
+gevent==24.2.1
