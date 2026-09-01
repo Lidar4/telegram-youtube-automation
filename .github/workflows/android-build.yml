@@ -1,23 +1,26 @@
-name: Android Debug APK
+name: Android APK Build
 
 on:
+  workflow_dispatch:
+
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
-      - 'android-companion/**'
-      - '.github/workflows/android-build.yml'
+      - "android-companion/**"
+      - ".github/workflows/android-build.yml"
+
   pull_request:
     paths:
-      - 'android-companion/**'
-      - '.github/workflows/android-build.yml'
-  workflow_dispatch:
+      - "android-companion/**"
+      - ".github/workflows/android-build.yml"
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build Android debug APK
+  build-apk:
+    name: Build Android Debug APK
     runs-on: ubuntu-latest
 
     defaults:
@@ -32,30 +35,50 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
+          cache: gradle
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK packages
-        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-
-      - name: Enable AndroidX
         run: |
-          printf 'android.useAndroidX=true\nandroid.enableJetifier=true\n' > gradle.properties
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Set up Gradle
+      - name: Configure AndroidX
+        run: |
+          printf '%s\n' \
+            'android.useAndroidX=true' \
+            'android.enableJetifier=true' \
+            > gradle.properties
+
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: "8.9"
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --no-daemon
+      - name: Show build environment
+        run: |
+          java -version
+          gradle --version
+          adb version
 
-      - name: Upload debug APK
+      - name: Clean Android project
+        run: gradle clean --no-daemon --stacktrace
+
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK exists
+        run: |
+          echo "APK output:"
+          ls -lah app/build/outputs/apk/debug/
+          test -f app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: android-technician-debug-apk
-          path: android-companion/app/build/outputs/apk/debug/*.apk
+          path: android-companion/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
