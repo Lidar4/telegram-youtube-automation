@@ -5,4 +5,5 @@
 *.pem
 *.key
 secrets.json
+credentials.json
 token.txt
