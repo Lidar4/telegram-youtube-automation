@@ -1,0 +1,8 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+token.txt
